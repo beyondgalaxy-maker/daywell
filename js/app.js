@@ -217,7 +217,7 @@ function confirmBox({ title, body = '', ok = 'OK', cancel = 'Cancel', danger = f
       done(false);
     };
     d.showModal();
-    d.querySelector('[data-c=yes]').focus();
+    d.querySelector(danger ? '[data-c=no]' : '[data-c=yes]').focus();
   });
 }
 
@@ -531,7 +531,10 @@ function welcomeHtml() {
   const rows = E.STARTER.map(
     (s, i) => `<label><input type="checkbox" data-starter="${i}" checked><span>${esc(s.title)}</span><small>${s.repeat ? 'Daily' : 'Once'}${s.estMin ? `, ${E.fmtEst(s.estMin, s.estMax)}` : ''}${s.optional ? ', optional' : ''}</small></label>`,
   ).join('');
-  return `<section class="welcome"><h2>Welcome to the new Daywell</h2>
+  const link = coarse()
+    ? `<div class="w-link">${I.phone}<p><b>Already using Daywell on your computer?</b> Open Settings there, tap <b>On your phone → Show code</b>, and scan it with this phone’s camera. Your tasks will show up here.</p>${isStandalone() ? `<button type="button" class="btn secondary" data-act="paste-setup">${I.link}Paste setup</button>` : ''}</div>`
+    : '';
+  return `<section class="welcome">${link}<h2>Welcome to the new Daywell</h2>
 <p>Type a task below and press Enter. Press ${MOD}+Enter to hand Claude a whole list. Want your routines and to-dos from the first Daywell?</p>
 <div class="starter">${rows}</div>
 <div class="w-actions"><button type="button" class="btn" data-act="seed">Add selected</button><button type="button" class="btn secondary" data-act="seed-skip">Start empty</button>${store.device.apiKey ? '' : `<button type="button" class="btn secondary" data-act="settings">${I.key}Connect Claude</button>`}</div></section>`;
@@ -1517,22 +1520,44 @@ function openSettings(focus) {
   }
 }
 
+const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 function phoneSection() {
-  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
-  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-  const install = standalone
-    ? '<p>Daywell is installed on this device.</p>'
-    : ui.installPrompt
-      ? `<p>Install Daywell so it opens full screen from your home screen, like an app.</p><div class="row" style="margin-top:10px"><button type="button" class="btn" data-st="install">${I.download}Install Daywell</button></div>`
-      : ios
-        ? '<p>In Safari, tap <b>Share</b>, then <b>Add to Home Screen</b>. Daywell then opens full screen, like an app.</p>'
-        : coarse()
-          ? '<p>In your browser menu, choose <b>Add to Home screen</b> or <b>Install app</b>. Daywell then opens full screen, like an app.</p>'
-          : `<p>Open <b>${esc(location.host + location.pathname.replace(/index\.html$/, ''))}</b> on your phone and add it to your home screen. If Google is connected, use <b>Copy setup link</b> above to bring your tasks along.</p>`;
-  const gestures = coarse()
-    ? `<div class="kbd-list" style="margin-top:12px"><kbd>Swipe right</kbd><span>Mark a task done</span><kbd>Swipe left</kbd><span>Put it off until tomorrow (daily routines skip today). In Everything else, it brings the task to today.</span><kbd>Hold</kbd><span>Pick it up to reorder</span><kbd>Undo</kbd><span>Takes back the last change. Anything you typed goes back in the box.</span></div>`
-    : '';
-  return `<section class="st-sec" id="st-phone"><h3>On your phone</h3>${install}${gestures}</section>`;
+  const linked = google.configured;
+  const hasKey = !!store.device.apiKey;
+  const pasteBox = `<div class="st-row paste-row"><input id="st-paste" class="inp wide" placeholder="Paste your setup link" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="button" class="btn" data-st="paste-go">Set up</button></div>`;
+  // On a computer: a code to scan with the phone's camera.
+  if (!coarse()) {
+    const body = ui.phoneCode
+      ? `<div class="qr-wrap"><div class="qr" id="st-qr"></div><div class="qr-side">
+<p><b>Point your phone’s camera at the code</b> and tap the link that pops up. Daywell opens in your phone’s browser${linked ? ' with your tasks and calendar' : ''}.</p>
+${hasKey ? `<label class="toggle-row"><input type="checkbox" id="st-qrkey" ${ui.qrKey !== false ? 'checked' : ''}>Include my Claude key, so Plan my day and Ask work there too</label>` : ''}
+<p class="muted-note">${linked ? 'Only scan it with your own phone: this code opens your tasks.' : 'Connect Google above first, so your phone shows the same tasks.'}</p>
+<p class="muted-note">iPhone tip: after it opens, you can tap Share, then Add to Home Screen. Daywell will show you one quick step to link the Home Screen app too.</p>
+<button type="button" class="chip-btn" data-st="qr-hide">Hide code</button></div></div>`
+      : `<p>No app to download. Daywell runs in your phone’s browser. Show a code here and scan it with your phone’s camera to open Daywell there${linked ? ', already linked to your tasks and calendar' : ''}.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="qr-show">${I.phone}Show code for my phone</button></div>`;
+    return `<section class="st-sec" id="st-phone"><h3>On your phone</h3>${body}</section>`;
+  }
+  // On a phone.
+  const standalone = isStandalone();
+  const ios = isIOS();
+  let body = '';
+  if (!linked) {
+    body = standalone
+      ? `<p>This Home Screen app keeps its own storage, so link it once: in Safari, open Daywell, go to <b>Settings</b> and tap <b>Copy setup</b>. Then come back here and tap <b>Paste setup</b>.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="paste-setup">${I.link}Paste setup</button></div>${ui.pasteBox ? pasteBox : ''}`
+      : `<p>To see the tasks from your computer here, open Daywell on your computer, go to <b>Settings → On your phone → Show code</b>, and scan it with this phone’s camera.</p><div class="row" style="margin-top:12px"><button type="button" class="btn secondary" data-st="paste-setup">${I.link}Paste a setup link instead</button></div>${ui.pasteBox ? pasteBox : ''}`;
+  } else if (standalone) {
+    body = '<p>Daywell is on your Home Screen and linked to your tasks.</p>';
+  } else if (ios) {
+    body = `<p>For a full-screen app: tap <b>Share</b>, then <b>Add to Home Screen</b>. On iPhone the Home Screen app keeps its own storage, so tap <b>Copy setup</b> first, then open the new app and tap <b>Paste setup</b>.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="copy-setup">${I.copy}Copy setup</button></div>`;
+  } else {
+    body = ui.installPrompt
+      ? `<p>Install Daywell so it opens full screen from your home screen, like an app.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="install">${I.download}Install Daywell</button></div>`
+      : '<p>For a full-screen app, open your browser menu and choose <b>Add to Home screen</b> or <b>Install app</b>.</p>';
+  }
+  const gestures = `<div class="kbd-list" style="margin-top:14px"><kbd>Swipe right</kbd><span>Mark a task done</span><kbd>Swipe left</kbd><span>Put it off until tomorrow (daily routines skip today). In Everything else, it brings the task to today.</span><kbd>Hold</kbd><span>Pick it up to reorder</span><kbd>Undo</kbd><span>Takes back the last change. Anything you typed goes back in the box.</span></div>`;
+  return `<section class="st-sec" id="st-phone"><h3>${linked ? 'On your phone' : 'Link this phone'}</h3>${body}${gestures}</section>`;
 }
 
 function renderSettings() {
@@ -1577,14 +1602,15 @@ function renderSettings() {
   ]
     .map(([v, l]) => `<button type="button" data-st="ws" data-v="${v}" aria-pressed="${(sh.weekStart ?? 1) === v}">${l}</button>`)
     .join('')}</div></div></section>
-<section class="st-sec" id="st-google"><h3>Google Calendar and sync <span class="badge${g.configured ? '' : ' off'}">${g.configured ? 'Connected' : 'Not connected'}</span></h3>${googleBody}</section>
+${coarse() && !g.configured ? phoneSection() : ''}<section class="st-sec" id="st-google"><h3>Google Calendar and sync <span class="badge${g.configured ? '' : ' off'}">${g.configured ? 'Connected' : 'Not connected'}</span></h3>${googleBody}</section>
+${coarse() && !g.configured ? '' : phoneSection()}
 <section class="st-sec" id="st-data"><h3>Your data</h3><p>Everything lives in this browser${g.configured ? ' and your Google script' : ''}. Keep a backup now and then.</p>
 <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn secondary" data-st="export">${I.download}Download backup</button><button type="button" class="btn secondary" data-st="import">${I.upload}Restore from backup</button><input type="file" id="st-file" accept="application/json,.json" hidden>${!store.state.meta.seeded || !store.state.tasks.some((t) => !t.purged && E.STARTER.some((s) => s.title === t.title)) ? `<button type="button" class="btn secondary" data-st="seed">Add my Daywell routines</button>` : ''}<button type="button" class="btn secondary" data-st="wipe" style="color:var(--danger)">${I.trash}Delete all tasks</button></div></section>
 <section class="st-sec"><h3>Appearance</h3><div class="st-row"><label>Theme</label><div class="seg" role="group">${['auto', 'light', 'dark'].map((v) => `<button type="button" data-st="theme" data-v="${v}" aria-pressed="${dv.theme === v}">${v === 'auto' ? 'Match system' : v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div></div></section>
-${phoneSection()}
 ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>`}
 <p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
+  if (ui.phoneCode) drawPhoneCode();
 }
 
 async function onSettings(act, el) {
@@ -1683,16 +1709,30 @@ async function onSettings(act, el) {
     return renderSettings();
   }
   if (act === 'setup-link') {
-    const withKey = $('#st-linkkey')?.checked;
-    const payload = { u: dv.gsUrl, s: dv.gsSecret, m: dv.model, e: dv.effort };
-    if (withKey) payload.k = dv.apiKey;
-    const link = `${location.origin}${location.pathname}#setup=${b64urlEncode(JSON.stringify(payload))}`;
-    await copyText(link);
+    await copyText(setupLink({ key: !!$('#st-linkkey')?.checked }));
     toast('Setup link copied. Open it on your other device.');
     return;
   }
+  if (act === 'copy-setup') {
+    await copyText(setupLink({ key: true }));
+    toast('Copied. Now add Daywell to your Home Screen, open it, and tap Paste setup.');
+    return;
+  }
+  if (act === 'paste-setup') return pasteSetup();
+  if (act === 'paste-go') {
+    const m = ($('#st-paste')?.value || '').match(/#setup=([\w-]+)/);
+    if (!m) return toast('That isn’t a Daywell setup link.');
+    $('#settings').close();
+    return applySetup(m[1]);
+  }
+  if (act === 'qr-show' || act === 'qr-hide') {
+    ui.phoneCode = act === 'qr-show';
+    renderSettings();
+    if (ui.phoneCode) $('#st-phone')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    return;
+  }
   if (act === 'disconnect') {
-    const ok = await confirmBox({ title: 'Disconnect Google?', body: 'Your tasks stay on this device and in your Google script. You can reconnect any time.', ok: 'Disconnect' });
+    const ok = await confirmBox({ title: 'Disconnect Google?', body: 'Calendar and sync stop on this device until you reconnect, which takes a few steps. Your tasks stay here and in your Google script.', ok: 'Disconnect', cancel: 'Keep connected', danger: true });
     if (!ok) return;
     store.setDevice({ gsUrl: '', gsSecret: '', syncRev: null, lastSync: 0 });
     google.clear();
@@ -1734,6 +1774,10 @@ function saveKeyField() {
 }
 
 function onSettingsChange(e) {
+  if (e.target.id === 'st-qrkey') {
+    ui.qrKey = e.target.checked;
+    return drawPhoneCode();
+  }
   const el = e.target;
   if (el.id === 'st-key' || el.id === 'st-model') {
     // Update in place: re-rendering here would swallow the click that caused the blur.
@@ -1843,16 +1887,76 @@ function applyTheme() {
   document.documentElement.dataset.theme = store.device.theme || 'auto';
 }
 
+const SCRIPT_PREFIX = 'https://script.google.com/macros/s/';
+
+// A link that sets up another device: your Google script (and, if you like, your Claude key).
+function setupLink({ key = false } = {}) {
+  const dv = store.device;
+  const p = {};
+  if (dv.gsUrl && dv.gsSecret) {
+    const id = dv.gsUrl.startsWith(SCRIPT_PREFIX) && dv.gsUrl.endsWith('/exec') ? dv.gsUrl.slice(SCRIPT_PREFIX.length, -5) : '';
+    if (/^[\w-]+$/.test(id)) p.d = id;
+    else p.u = dv.gsUrl;
+    p.s = dv.gsSecret;
+  }
+  if (key && dv.apiKey) p.k = dv.apiKey;
+  if (dv.model && dv.model !== 'claude-sonnet-5-5') p.m = dv.model;
+  if (dv.effort && dv.effort !== 'medium') p.e = dv.effort;
+  return `${location.origin}${location.pathname}${Object.keys(p).length ? `#setup=${b64urlEncode(JSON.stringify(p))}` : ''}`;
+}
+
+async function drawPhoneCode() {
+  const box = $('#st-qr');
+  if (!box) return;
+  const link = setupLink({ key: ui.qrKey !== false });
+  try {
+    const { default: qrcode } = await import('./vendor/qrcode.mjs');
+    const qr = qrcode(0, 'L');
+    qr.addData(link);
+    qr.make();
+    const n = qr.getModuleCount();
+    let d = '';
+    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + 4} ${r + 4}h1v1h-1z`;
+    box.innerHTML = `<svg viewBox="0 0 ${n + 8} ${n + 8}" role="img" aria-label="Code that opens Daywell on your phone" shape-rendering="crispEdges"><rect width="${n + 8}" height="${n + 8}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
+  } catch {
+    box.innerHTML = '<p class="muted-note">The code couldn’t be drawn. Use Copy setup link in the Google section instead.</p>';
+  }
+}
+
+async function pasteSetup() {
+  let text = '';
+  try {
+    text = await navigator.clipboard.readText();
+  } catch {
+    /* the browser said no; fall back to the paste box */
+  }
+  const m = String(text || '').match(/#setup=([\w-]+)/);
+  if (m) {
+    if ($('#settings').open) $('#settings').close();
+    return applySetup(m[1]);
+  }
+  ui.pasteBox = true;
+  if ($('#settings').open) renderSettings();
+  else openSettings();
+  setTimeout(() => $('#st-paste')?.focus(), 250);
+  toast('Paste your setup link in the box, then tap Set up.');
+}
+
 async function handleSetupLink() {
   const m = location.hash.match(/^#setup=([\w-]+)/);
   if (!m) return;
   history.replaceState(null, '', location.pathname + location.search);
+  await applySetup(m[1]);
+}
+
+async function applySetup(code) {
   let p;
   try {
-    p = JSON.parse(b64urlDecode(m[1]));
+    p = JSON.parse(b64urlDecode(code));
   } catch {
-    return toast("That setup link didn't work. Copy it again from Settings.");
+    return toast("That setup link didn't work. Make a new one in Settings on your computer.");
   }
+  if (p.d && !p.u) p.u = `${SCRIPT_PREFIX}${p.d}/exec`;
   const parts = [p.u ? 'connect your Google script' : '', p.k ? 'save your Claude key' : ''].filter(Boolean);
   if (!parts.length) return;
   const ok = await confirmBox({ title: 'Set up this device?', body: `This will ${parts.join(' and ')} on this device.`, ok: 'Set up' });
@@ -1873,7 +1977,8 @@ async function handleSetupLink() {
   if (p.m) patch.model = p.m;
   if (p.e) patch.effort = p.e;
   store.setDevice(patch);
-  toast('This device is set up');
+  ui.pasteBox = false;
+  toast(patch.gsUrl ? 'Linked. Your tasks are on their way.' : 'This device is set up');
   if (google.configured) {
     await google.sync();
     await google.refreshEvents(true);
@@ -2244,6 +2349,8 @@ function onClick(e) {
     case 'menu':
       if (menuAnchor === a) return;
       return id && openMenu(a, id, li?.dataset.day);
+    case 'paste-setup':
+      return pasteSetup();
     case 'tip-ok':
       store.setDevice({ tipGestures: true });
       return render();
@@ -2528,6 +2635,8 @@ function bindEvents() {
   sheetDrag($('#drawer'), '.sheet-grip, .dr-head', closeDrawer);
   sheetDrag($('#menu'), '.sheet-grip', closeMenu);
   watchViewport();
+  // A setup link opened while Daywell is already open only changes the #hash, so listen for it too.
+  window.addEventListener('hashchange', handleSetupLink);
   window.addEventListener('beforeinstallprompt', (e) => {
     e.preventDefault();
     ui.installPrompt = e;

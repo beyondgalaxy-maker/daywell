@@ -2285,6 +2285,93 @@ dialog::backdrop {
 }
 
 
+/* ---------- linking a phone ---------- */
+.qr-wrap {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+  margin-top: 12px;
+}
+.qr {
+  flex-shrink: 0;
+  width: 232px;
+  height: 232px;
+  padding: 8px;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: inset 0 0 0 1px var(--line-2);
+}
+.qr svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  stroke: none;
+}
+.qr svg rect {
+  fill: #fff;
+}
+.qr svg path {
+  fill: #000;
+}
+.qr-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+.qr-side p {
+  margin: 0;
+}
+.qr-side .toggle-row {
+  align-items: flex-start;
+  padding-top: 0;
+}
+.qr-side .toggle-row input {
+  margin-top: 3px;
+}
+.paste-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.paste-row .inp {
+  flex: 1;
+  min-width: 0;
+}
+.w-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px 12px;
+  margin: -4px 0 18px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--spruce-soft);
+}
+.w-link > svg {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--spruce);
+}
+.w-link p {
+  flex: 1;
+  min-width: 0;
+  margin: 0 !important;
+  font-size: 14px;
+  line-height: 1.45;
+}
+.w-link .btn {
+  margin-left: 32px;
+}
+@media (max-width: 620px) {
+  .qr-wrap {
+    flex-direction: column;
+  }
+}
+
 /* ---------- touch: swipes, holds, sheets ---------- */
 .swipe-under {
   position: absolute;

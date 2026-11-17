@@ -1,5 +1,5 @@
 // Daywell service worker: works offline, always prefers the freshest version when online.
-const CACHE = 'daywell-v4';
+const CACHE = 'daywell-v5';
 const ASSETS = [
   './',
   'index.html',
