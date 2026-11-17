@@ -2,7 +2,7 @@
 import * as E from './engine.js';
 import * as AI from './ai.js';
 import { Store, applyChanges, markDone, moveTask, repairState } from './store.js';
-import { Google, newSecret, scriptText, validScriptUrl } from './google.js';
+import { Google, HOME_SCRIPT, newSecret, scriptText, validScriptUrl } from './google.js';
 import { I } from './icons.js';
 
 const store = new Store();
@@ -43,7 +43,7 @@ const ui = {
   autoPlanTried: null,
   suppressClick: false,
   editStep: null,
-  showDone: true,
+  showDone: !matchMedia('(max-width: 860px)').matches,
   lastProgress: null,
   toastTimer: null,
   syncTimer: null,
@@ -145,6 +145,7 @@ function restoreComposer({ input: text, mode }) {
   if (!text) return;
   if (!el.value.includes(text)) el.value = el.value.trim() ? `${el.value.replace(/\s+$/, '')}\n${text}` : text;
   ui.restored = { text, mode };
+  if (mode === 'ask') ui.modeOverride = 'ask';
   autoGrow();
   renderParseChips();
   const box = $('#composer');
@@ -245,7 +246,71 @@ function render() {
   if (ui.drawer && !ui.fromDrawer && !$('#drawer').contains(document.activeElement)) renderDrawer();
 }
 
+/* ---------- sign in on a new device with your key ---------- */
+
+const needsSignIn = () => !google.configured && !store.device.localOnly;
+
+function renderGate() {
+  let g = $('#gate');
+  if (!needsSignIn()) {
+    if (g) g.remove();
+    document.documentElement.classList.remove('gated');
+    return;
+  }
+  document.documentElement.classList.add('gated');
+  if (g) return;
+  g = document.createElement('div');
+  g.id = 'gate';
+  g.className = 'gate';
+  g.innerHTML = `<form class="gate-card" id="gateForm">
+<svg class="brand-mark gate-mark" viewBox="0 0 32 32" aria-hidden="true"><rect class="bm-bg" width="32" height="32" rx="9"/><path class="bm-sun" d="M10.5 20.5a5.5 5.5 0 0 1 11 0z"/><path class="bm-line" d="M7.5 20.5h17"/></svg>
+<h1>Daywell</h1>
+<input id="gateKey" class="inp" type="password" name="password" autocomplete="current-password" autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="Your key" aria-label="Your key" enterkeyhint="go">
+<button type="submit" class="btn" id="gateGo">Open</button>
+<p class="gate-err" id="gateErr" role="alert"></p>
+<button type="button" class="gate-skip" data-act="gate-skip">Use without signing in</button>
+</form>`;
+  document.body.appendChild(g);
+  g.querySelector('#gateForm').addEventListener('submit', onGateSubmit);
+  if (!coarse()) setTimeout(() => $('#gateKey')?.focus(), 50);
+}
+
+async function onGateSubmit(e) {
+  e.preventDefault();
+  const input = $('#gateKey');
+  const btn = $('#gateGo');
+  const err = $('#gateErr');
+  const phrase = input.value.trim();
+  if (!phrase) return input.focus();
+  btn.disabled = true;
+  btn.textContent = 'Opening…';
+  err.textContent = '';
+  try {
+    const r = await google.signIn(phrase);
+    input.blur();
+    const local = store.state.tasks.filter((t) => !t.purged && !t.deletedAt).length;
+    store.setDevice({ gsUrl: r.url, gsSecret: r.secret, sync: true, localOnly: false, syncRev: null, ...(r.claudeKey ? { apiKey: r.claudeKey } : {}) });
+    if (local) {
+      const replace = await confirmBox({ title: 'Use your synced tasks?', body: `This device has ${local} task${local === 1 ? '' : 's'} of its own. Replace them with your synced tasks, or keep both?`, ok: 'Use synced tasks', cancel: 'Keep both' });
+      if (replace) store.replaceState({ ...store.state, tasks: [], log: [], meta: { order: {}, plans: {}, dismiss: {}, timer: null, seeded: true } }, 'change');
+    }
+    renderGate();
+    toast('Opening your Daywell…');
+    await google.sync();
+    await google.refreshEvents(true);
+    render();
+    const name = (store.settings.name || '').trim();
+    toast(name ? `Welcome back, ${name}` : 'You’re in');
+  } catch (ex) {
+    err.textContent = ex.message;
+    btn.disabled = false;
+    btn.textContent = 'Open';
+    input.select();
+  }
+}
+
 function renderTop() {
+  renderGate();
   for (const b of $$('.views button')) b.setAttribute('aria-current', b.dataset.view === ui.view ? 'page' : 'false');
   const tabNow = ui.view === 'today' ? ui.tab : ui.view;
   for (const b of $$('#tabbar button')) b.setAttribute('aria-current', b.dataset.tab === tabNow ? 'page' : 'false');
@@ -381,7 +446,7 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const nextItem = isToday ? open.find((i) => !i.dueOnly && !i.t.optional) || open.find((i) => !i.dueOnly) : null;
   const bonus = !!nextItem?.t.optional;
   // A one-time hint so the phone gestures are discoverable.
-  if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe a task right when it’s done, or left to put it off. Press and hold to reorder.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
+  if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe right when done, left for later. Hold to move.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
   html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${open.map((i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus })).join('')}${!open.length && !showWelcome ? `<li class="empty-drop">${isPast ? 'Nothing else was planned for this day.' : isToday ? (prog.doneN ? 'Everything on today’s list is done. Pick something from Worth doing today if you feel like more.' : 'Nothing planned yet. Add a task below, or drag one in from Everything else.') : 'Nothing planned yet. Drag tasks here to plan them for this day.'}</li>` : ''}</ul>`;
   if (isToday) html += suggestionsHtml(ctx, items);
   if (missed.length) html += `<h3 class="list-head">Not done <span class="n">${missed.length}</span></h3><ul class="tasks soft" data-list="none">${missed.map((i) => taskRow(i, ctx, 'past')).join('')}</ul>`;
@@ -432,6 +497,7 @@ function cheerHtml(ctx, D, prog, isToday) {
     else if (pct < 0.5) msg = pick([`Nice start: ${doneN} done.`, `${doneN} down. Good momentum.`, `You’re moving: ${doneN} done.`], seed);
     else if (pct < 0.85) msg = pick([`Over halfway. ${left} to go.`, `${doneN} done. Keep it rolling.`, `Good pace: just ${left} left.`], seed);
     else msg = pick([`Almost there. ${left} left.`, `Home stretch: ${left} to go.`], seed);
+    if (isMobile()) msg = msg.replace(/^(.*?[.!:])\s.*$/, '$1').replace(/:$/, '.');
     line = `${greet} ${msg}`;
   }
   const subs = [];
@@ -456,16 +522,50 @@ function cheerHtml(ctx, D, prog, isToday) {
   return `<section class="cheer">${total ? ring : ''}<div class="cheer-text"><p class="cheer-line">${esc(line)}</p>${subs.length ? `<p class="cheer-sub">${subs.map((x) => `<span>${x}</span>`).join('')}</p>` : ''}</div></section>`;
 }
 
+// Calendar titles are often long codes ("Elective - EB 7: … - Lecture - Dr. X [abc] [2026-27]").
+// Keep the part that says what it is; the rest becomes a quiet note.
+function tidyEvent(title) {
+  const t = String(title || '').replace(/\s*\[[^\]]*\]/g, '').replace(/\s+/g, ' ').trim();
+  const parts = t.split(/\s*-\s+|\s+-\s*/).map((x) => x.trim()).filter(Boolean);
+  if (parts.length < 2) return { main: t || 'Event', note: '' };
+  const noise = /^(elective|mandatory|optional|required|lecture|tutorial|lab|seminar|small group( faculty)?|in person|virtual|zoom|(dr|prof)\.?\s.+)$/i;
+  const main = parts.find((x) => x.includes(':') && !noise.test(x)) || parts.filter((x) => !noise.test(x)).sort((a, b) => b.length - a.length)[0] || parts[0];
+  const note = parts.filter((x) => x !== main && !/^(dr|prof)\.?\s/i.test(x)).join(' · ');
+  return { main, note };
+}
+
 function eventsHtml(D, isToday) {
   const evs = google.eventsOn(D);
   if (!evs.length) return '';
   const now = Date.now();
+  const short = (d) => E.fmtClock(d).replace(/\s?(AM|PM)$/i, (m) => m.trim().toLowerCase().charAt(0));
+  if (isMobile()) {
+    // Phones: a compact agenda of what's left today; earlier events fold away.
+    const allDay = evs.filter((e) => e.allDay);
+    const timed = evs.filter((e) => !e.allDay);
+    const past = isToday ? timed.filter((e) => Date.parse(e.end) < now) : [];
+    const rest = timed.filter((e) => !past.includes(e));
+    const showAll = ui.agendaAll;
+    const shown = showAll ? timed : rest.slice(0, 4);
+    const hidden = timed.length - shown.length;
+    const later = showAll ? 0 : rest.length - shown.length;
+    const row = (ev) => {
+      const { main } = tidyEvent(ev.title);
+      const st = Date.parse(ev.start);
+      const nowOn = isToday && st <= now && Date.parse(ev.end) >= now;
+      return `<li class="ag${past.includes(ev) ? ' past' : ''}${nowOn ? ' now' : ''}${ev.optional ? ' opt' : ''}" style="--ev:${esc(ev.color || '')}" title="${esc(ev.title)}"><b>${nowOn ? 'Now' : short(new Date(st))}</b><i></i><span>${esc(main)}</span></li>`;
+    };
+    const days = allDay.map((ev) => `<span class="ag-day" style="--ev:${esc(ev.color || '')}"><i></i>${esc(tidyEvent(ev.title).main)}</span>`).join('');
+    if (!shown.length && !days) return past.length ? `<button type="button" class="ag-more" data-act="agenda">${past.length} earlier event${past.length === 1 ? '' : 's'}</button>` : '';
+    return `<section class="agenda">${days ? `<div class="ag-days">${days}</div>` : ''}${shown.length ? `<ul>${shown.map(row).join('')}</ul>` : ''}${hidden > 0 || showAll ? `<button type="button" class="ag-more" data-act="agenda">${showAll ? 'Show less' : later ? `${hidden} more` : `${hidden} earlier`}</button>` : ''}</section>`;
+  }
   return `<div class="events">${evs
     .slice(0, 8)
     .map((ev) => {
       const past = isToday && !ev.allDay && Date.parse(ev.end) < now;
       const when = ev.allDay ? 'All day' : E.fmtClock(new Date(ev.start));
-      return `<span class="ev${past ? ' past' : ''}${ev.optional ? ' opt' : ''}" style="--ev:${esc(ev.color || '')}" title="${esc(ev.title)}${ev.calName ? ` (${esc(ev.calName)})` : ''}"><i></i><b>${when}</b><span>${esc(ev.title)}</span></span>`;
+      const { main } = tidyEvent(ev.title);
+      return `<span class="ev${past ? ' past' : ''}${ev.optional ? ' opt' : ''}" style="--ev:${esc(ev.color || '')}" title="${esc(ev.title)}${ev.calName ? ` (${esc(ev.calName)})` : ''}"><i></i><b>${when}</b><span>${esc(main)}</span></span>`;
     })
     .join('')}${evs.length > 8 ? `<span class="ev">+${evs.length - 8} more</span>` : ''}</div>`;
 }
@@ -512,7 +612,7 @@ function briefHtml(ctx) {
   const sug = (plan.suggest || []).map((s, i) => ({ ...s, i })).filter((s) => !added.has(s.i));
   const step = ui.planStep && ui.planStep.day === today ? ui.planStep.step : null;
   return `<div class="brief"><div class="b-head">${I.spark}${by} planned your day at ${E.fmtClock(new Date(plan.at))}</div>
-<p class="b-text">${esc(plan.brief)}</p>${moves.length ? `<p class="b-moves">${moves.join(' ')}</p>` : ''}
+<p class="b-text" data-act="brief-more">${esc(plan.brief)}</p>${moves.length ? `<p class="b-moves">${moves.join(' ')}</p>` : ''}
 ${sug.length || step ? `<div class="b-actions">${sug.map((s) => `<button type="button" class="chip-btn" data-act="plan-add" data-i="${s.i}" title="${esc(s.reason)}">${I.plus}${esc(s.title)}</button>`).join('')}${step ? `<button type="button" class="chip-btn" data-act="plan-undo">${I.undo}Undo plan</button>` : ''}</div>` : ''}
 <button type="button" class="icon-btn sm b-close" data-act="plan-hide" aria-label="Hide the plan summary">${I.x}</button></div>`;
 }
@@ -531,11 +631,8 @@ function welcomeHtml() {
   const rows = E.STARTER.map(
     (s, i) => `<label><input type="checkbox" data-starter="${i}" checked><span>${esc(s.title)}</span><small>${s.repeat ? 'Daily' : 'Once'}${s.estMin ? `, ${E.fmtEst(s.estMin, s.estMax)}` : ''}${s.optional ? ', optional' : ''}</small></label>`,
   ).join('');
-  const link = coarse()
-    ? `<div class="w-link">${I.phone}<p><b>Already using Daywell on your computer?</b> Open Settings there, tap <b>On your phone → Show code</b>, and scan it with this phone’s camera. Your tasks will show up here.</p>${isStandalone() ? `<button type="button" class="btn secondary" data-act="paste-setup">${I.link}Paste setup</button>` : ''}</div>`
-    : '';
-  return `<section class="welcome">${link}<h2>Welcome to the new Daywell</h2>
-<p>Type a task below and press Enter. Press ${MOD}+Enter to hand Claude a whole list. Want your routines and to-dos from the first Daywell?</p>
+  return `<section class="welcome"><h2>Welcome to Daywell</h2>
+<p>Type a task below to add it, or type a whole list and Claude sorts it. Start with these?</p>
 <div class="starter">${rows}</div>
 <div class="w-actions"><button type="button" class="btn" data-act="seed">Add selected</button><button type="button" class="btn secondary" data-act="seed-skip">Start empty</button>${store.device.apiKey ? '' : `<button type="button" class="btn secondary" data-act="settings">${I.key}Connect Claude</button>`}</div></section>`;
 }
@@ -745,35 +842,64 @@ function renderComposerMeta() {
   const tb = $('#targetBtn');
   const D = store.device.addTarget === 'day' ? ui.day || store.today : null;
   tb.innerHTML = `${I.down}<span>${D ? `To ${esc(relWord(D, store.today))}` : 'To Anytime'}</span>`;
-  tb.title = 'Where new tasks go when you press Enter. Click to switch.';
-  const ask = $('#askBtn');
-  ask.classList.toggle('busy', ui.ai?.status === 'busy');
+  tb.title = 'Where new tasks go. Click to switch.';
   renderParseChips();
+}
+
+// Plain tasks are added straight away; lists, questions and requests go to Claude.
+function autoMode(v) {
+  if (!store.device.apiKey) return 'add';
+  const t = v.trim();
+  if (!t) return 'add';
+  if (t.split('\n').filter((l) => l.trim()).length > 1) return 'ask';
+  if (t.split(/[,;]+|\s+(?:and then|then|also)\s+/i).filter((x) => x.trim().length > 1).length >= 3) return 'ask';
+  if (/\?\s*$/.test(t)) return 'ask';
+  if (/^(please\s+)?(move|delete|remove|finish|complete|mark|reschedule|push|postpone|rename|change|clear|cancel|plan|sort|organi[sz]e|prioriti[sz]e|what|when|which|how|should|can you|could you|help me|i have|i need to|i want to)\b/i.test(t)) return 'ask';
+  if (t.length > 100) return 'ask';
+  return 'add';
+}
+function sendMode() {
+  const v = $('#input').value;
+  if (!store.device.apiKey || !v.trim()) return 'add';
+  return ui.modeOverride || autoMode(v);
+}
+function send() {
+  if (sendMode() === 'ask') return askClaude();
+  return addFromInput();
+}
+function renderSendBtn() {
+  const btn = $('#addBtn');
+  const mode = sendMode();
+  const busy = ui.ai?.status === 'busy';
+  btn.classList.toggle('ai', mode === 'ask');
+  btn.classList.toggle('busy', busy && mode === 'ask');
+  btn.innerHTML = mode === 'ask' ? I.spark : I.plus;
+  btn.setAttribute('aria-label', mode === 'ask' ? 'Send to Claude' : 'Add task');
+  btn.title = mode === 'ask' ? 'Claude sorts it (Enter)' : 'Add (Enter)';
 }
 
 function renderParseChips() {
   const v = $('#input').value;
   const el = $('#parseChips');
+  if (!v.trim()) ui.modeOverride = null;
   if (ui.restored && !v.includes(ui.restored.text)) ui.restored = null;
+  renderSendBtn();
   const r = ui.restored;
-  if (r?.mode === 'ask') {
-    el.innerHTML = `<span class="pc back">${I.undo}Your message is back. Edit it, then ${coarse() ? 'tap Ask' : `${MOD}↵ to ask`} again</span>`;
+  const back = r ? `<span class="pc back">${I.undo}${r.mode === 'ask' ? 'Your message is back' : 'Back from undo'}</span>` : '';
+  if (!v.trim()) {
+    el.innerHTML = '';
     return;
   }
-  const back = r ? `<span class="pc back">${I.undo}Back from undo</span>` : '';
-  if (!v.trim()) {
-    el.innerHTML = `<span class="hint"><span><kbd>↵</kbd>Add</span><span><kbd>${MOD} ↵</kbd>Ask Claude</span><span><kbd>⇧ ↵</kbd>New line</span></span>`;
+  const hasKey = !!store.device.apiKey;
+  const mode = sendMode();
+  if (mode === 'ask') {
+    const n = v.split(/\n|[,;]+/).filter((x) => x.trim().length > 1).length;
+    el.innerHTML = `${back}<span class="pc ai">${I.spark}${n >= 2 ? `Claude sorts these ${n}` : 'Claude takes it from here'}</span><button type="button" class="pc mode" data-act="mode" data-v="add">Add as is</button>`;
     return;
   }
   const lines = v.split('\n').filter((l) => l.trim());
-  if (lines.length > 1) {
-    el.innerHTML = `${back}<span class="pc">${lines.length} tasks</span><span class="hint"><span>Enter adds each line</span><span>${MOD}+Enter lets Claude sort them</span></span>`;
-    return;
-  }
-  const p = E.parseQuick(v, store.today, { weekStart: store.settings.weekStart });
-  const n = v.split(/,|;/).filter((x) => x.trim().length > 1).length;
-  const listHint = n >= 3 ? `<span class="pc soft">${I.spark}Looks like ${n} things. ${coarse() ? 'Tap Ask' : `${MOD}↵`} to split them up</span>` : '';
-  el.innerHTML = back + (listHint || p.chips.map((c) => `<span class="pc">${esc(c.label)}</span>`).join(''));
+  const chips = lines.length > 1 ? `<span class="pc">${lines.length} tasks</span>` : E.parseQuick(v, store.today, { weekStart: store.settings.weekStart }).chips.map((c) => `<span class="pc">${esc(c.label)}</span>`).join('');
+  el.innerHTML = `${back}${chips}${hasKey ? `<button type="button" class="pc mode" data-act="mode" data-v="ask">${I.spark}Ask Claude</button>` : ''}`;
 }
 
 function autoGrow() {
@@ -790,6 +916,7 @@ function countItems(text) {
 }
 
 function renderAIPanel() {
+  renderSendBtn();
   const a = ui.ai;
   const el = $('#aiPanel');
   if (!a) {
@@ -1524,40 +1651,19 @@ const isStandalone = () => matchMedia('(display-mode: standalone)').matches || n
 const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
 function phoneSection() {
-  const linked = google.configured;
-  const hasKey = !!store.device.apiKey;
-  const pasteBox = `<div class="st-row paste-row"><input id="st-paste" class="inp wide" placeholder="Paste your setup link" autocomplete="off" autocapitalize="off" spellcheck="false"><button type="button" class="btn" data-st="paste-go">Set up</button></div>`;
-  // On a computer: a code to scan with the phone's camera.
-  if (!coarse()) {
-    const body = ui.phoneCode
-      ? `<div class="qr-wrap"><div class="qr" id="st-qr"></div><div class="qr-side">
-<p><b>Point your phone’s camera at the code</b> and tap the link that pops up. Daywell opens in your phone’s browser${linked ? ' with your tasks and calendar' : ''}.</p>
-${hasKey ? `<label class="toggle-row"><input type="checkbox" id="st-qrkey" ${ui.qrKey !== false ? 'checked' : ''}>Include my Claude key, so Plan my day and Ask work there too</label>` : ''}
-<p class="muted-note">${linked ? 'Only scan it with your own phone: this code opens your tasks.' : 'Connect Google above first, so your phone shows the same tasks.'}</p>
-<p class="muted-note">iPhone tip: after it opens, you can tap Share, then Add to Home Screen. Daywell will show you one quick step to link the Home Screen app too.</p>
-<button type="button" class="chip-btn" data-st="qr-hide">Hide code</button></div></div>`
-      : `<p>No app to download. Daywell runs in your phone’s browser. Show a code here and scan it with your phone’s camera to open Daywell there${linked ? ', already linked to your tasks and calendar' : ''}.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="qr-show">${I.phone}Show code for my phone</button></div>`;
-    return `<section class="st-sec" id="st-phone"><h3>On your phone</h3>${body}</section>`;
-  }
-  // On a phone.
-  const standalone = isStandalone();
-  const ios = isIOS();
-  let body = '';
-  if (!linked) {
-    body = standalone
-      ? `<p>This Home Screen app keeps its own storage, so link it once: in Safari, open Daywell, go to <b>Settings</b> and tap <b>Copy setup</b>. Then come back here and tap <b>Paste setup</b>.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="paste-setup">${I.link}Paste setup</button></div>${ui.pasteBox ? pasteBox : ''}`
-      : `<p>To see the tasks from your computer here, open Daywell on your computer, go to <b>Settings → On your phone → Show code</b>, and scan it with this phone’s camera.</p><div class="row" style="margin-top:12px"><button type="button" class="btn secondary" data-st="paste-setup">${I.link}Paste a setup link instead</button></div>${ui.pasteBox ? pasteBox : ''}`;
-  } else if (standalone) {
-    body = '<p>Daywell is on your Home Screen and linked to your tasks.</p>';
-  } else if (ios) {
-    body = `<p>For a full-screen app: tap <b>Share</b>, then <b>Add to Home Screen</b>. On iPhone the Home Screen app keeps its own storage, so tap <b>Copy setup</b> first, then open the new app and tap <b>Paste setup</b>.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="copy-setup">${I.copy}Copy setup</button></div>`;
-  } else {
-    body = ui.installPrompt
-      ? `<p>Install Daywell so it opens full screen from your home screen, like an app.</p><div class="row" style="margin-top:12px"><button type="button" class="btn" data-st="install">${I.download}Install Daywell</button></div>`
-      : '<p>For a full-screen app, open your browser menu and choose <b>Add to Home screen</b> or <b>Install app</b>.</p>';
-  }
-  const gestures = `<div class="kbd-list" style="margin-top:14px"><kbd>Swipe right</kbd><span>Mark a task done</span><kbd>Swipe left</kbd><span>Put it off until tomorrow (daily routines skip today). In Everything else, it brings the task to today.</span><kbd>Hold</kbd><span>Pick it up to reorder</span><kbd>Undo</kbd><span>Takes back the last change. Anything you typed goes back in the box.</span></div>`;
-  return `<section class="st-sec" id="st-phone"><h3>${linked ? 'On your phone' : 'Link this phone'}</h3>${body}${gestures}</section>`;
+  if (!google.configured) return '';
+  const ph = ui.phrase;
+  const state = ph == null ? '' : `<span class="badge${ph.set ? '' : ' off'}">${ph.set ? 'Set' : 'Not set'}</span>`;
+  const install = coarse() && !isStandalone()
+    ? `<p class="st-note">${isIOS() ? 'For an app icon: Share, then Add to Home Screen. Open it and type your key once.' : 'For an app icon: browser menu, then Add to Home screen.'}</p>`
+    : '';
+  return `<section class="st-sec" id="st-phone"><h3>Sign-in key ${state}</h3>
+<p>Open Daywell on your phone or any computer and type this key to get your tasks and calendar. Capital letters don’t matter.</p>
+<div class="st-row"><label for="st-phrase">${ph?.set ? 'New key' : 'Key'}</label><div class="row"><input id="st-phrase" class="inp" type="password" autocomplete="new-password" autocapitalize="none" spellcheck="false" placeholder="${ph?.set ? 'Type a new key' : 'Choose a key'}"><button type="button" class="btn" data-st="save-phrase">Save</button></div></div>
+${store.device.apiKey ? `<div class="st-row"><label></label><label class="toggle-row"><input type="checkbox" id="st-phrase-claude" ${!ph?.set || ph.claude ? 'checked' : ''}>Bring my Claude key along</label></div>` : ''}
+<div class="st-row"><label></label><span id="st-phrase-status" class="st-status">${ph?.set ? `Saved. On your phone, open <b>${esc(location.host + location.pathname.replace(/index\.html$/, ''))}</b> and type it.` : ''}</span></div>
+${install}
+<div class="st-row"><label></label><div class="row"><button type="button" class="chip-btn" data-st="sign-out">Sign out of this device</button></div></div></section>`;
 }
 
 function renderSettings() {
@@ -1571,10 +1677,10 @@ function renderSettings() {
     ? `<p>Connected. Your events show on each day, Claude plans around them, and your tasks sync across devices.</p>
 <div class="st-row"><label>Sync</label><div class="row"><input type="checkbox" class="switch" id="st-sync" ${dv.sync ? 'checked' : ''}><span>${g.status === 'error' ? `<span class="st-status err">${esc(g.error)}</span>` : dv.lastSync ? `Last synced ${E.fmtClock(new Date(dv.lastSync))}` : 'Not synced yet'}</span><button type="button" class="chip-btn" data-st="sync-now">${I.sync}Sync now</button></div></div>
 <div class="st-row"><label>Calendars</label><div>${cals.length ? `<div class="cal-list">${cals.map((c) => `<label><input type="checkbox" data-cal="${esc(c.id)}" ${(c.id in prefs ? prefs[c.id] : c.selected) ? 'checked' : ''}><i style="--ev:${esc(c.color)}"></i>${esc(c.name)}</label>`).join('')}</div>` : `<button type="button" class="chip-btn" data-st="load-cals">Show my calendars</button>`}</div></div>
-<div class="st-row"><label>Other devices</label><div class="row"><button type="button" class="chip-btn" data-st="setup-link">${I.link}Copy setup link</button><label class="toggle-row" style="padding:0"><input type="checkbox" id="st-linkkey" ${dv.apiKey ? '' : 'disabled'}>Include Claude key</label></div></div>
-<p class="st-note">Open the setup link on your phone to connect it in one tap. It contains your private keys, so send it only to yourself.</p>
 <div class="st-row"><label></label><div class="row"><button type="button" class="btn secondary" data-st="disconnect">Disconnect Google</button></div></div>`
-    : `<p>See your Google Calendar events on each day, let Claude plan around them, and sync tasks between your phone and laptop. It runs as a small free script inside your own Google account. Setup takes about 3 minutes.</p>
+    : `<div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="sign-in">Sign in with your key</button></div></div>
+<details class="st-more"><summary>Set up a new Google script</summary>
+<p>See your Google Calendar events on each day, let Claude plan around them, and sync tasks between your phone and laptop. It runs as a small free script inside your own Google account. Setup takes about 3 minutes.</p>
 <ol class="steps">
 <li><button type="button" class="chip-btn" data-st="copy-script">${I.copy}Copy script</button></li>
 <li>Open <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com</a>, delete the sample code, paste, and press <b>Save</b>.</li>
@@ -1582,8 +1688,8 @@ function renderSettings() {
 <li>Allow access. If Google says the app isn't verified, choose <b>Advanced</b>, then <b>Go to … (unsafe)</b>. It's your own script.</li>
 <li>Copy the <b>Web app URL</b> (it ends in /exec) and paste it here.</li></ol>
 <div class="st-row"><label for="st-gsurl">Web app URL</label><div class="row"><input id="st-gsurl" class="inp wide" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(dv.gsUrlDraft || '')}"></div></div>
-<div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect">Connect</button><span id="st-gstatus" class="st-status"></span></div></div>
-<p class="st-note">Already connected on another device? Open its setup link here instead.</p>`;
+<div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect">Connect</button><span id="st-gstatus" class="st-status"></span></div></div></details>
+`;
   $('#settings').innerHTML = `<div class="st-head"><h2>Settings</h2><button type="button" class="icon-btn" data-st="close" aria-label="Close settings">${I.x}</button></div><div class="st-body">
 <section class="st-sec" id="st-claude"><h3>Claude <span class="badge${dv.apiKey ? '' : ' off'}">${dv.apiKey ? 'Key saved' : 'Not set up'}</span></h3>
 <p>Claude turns lists into tasks, estimates times, asks quick questions, and plans your day. Your key stays in this browser and is only sent to Anthropic.</p>
@@ -1610,7 +1716,17 @@ ${coarse() && !g.configured ? '' : phoneSection()}
 ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>`}
 <p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
-  if (ui.phoneCode) drawPhoneCode();
+  if (google.configured && ui.phrase == null && !ui.phraseLoading) {
+    ui.phraseLoading = true;
+    google
+      .phraseInfo()
+      .then((r) => {
+        ui.phrase = { set: !!r.set, claude: !!r.claude };
+        if ($('#settings').open && !document.activeElement?.closest?.('#st-phone')) renderSettings();
+      })
+      .catch(() => {})
+      .finally(() => (ui.phraseLoading = false));
+  }
 }
 
 async function onSettings(act, el) {
@@ -1708,28 +1824,46 @@ async function onSettings(act, el) {
     }
     return renderSettings();
   }
-  if (act === 'setup-link') {
-    await copyText(setupLink({ key: !!$('#st-linkkey')?.checked }));
-    toast('Setup link copied. Open it on your other device.');
-    return;
-  }
-  if (act === 'copy-setup') {
-    await copyText(setupLink({ key: true }));
-    toast('Copied. Now add Daywell to your Home Screen, open it, and tap Paste setup.');
-    return;
-  }
-  if (act === 'paste-setup') return pasteSetup();
-  if (act === 'paste-go') {
-    const m = ($('#st-paste')?.value || '').match(/#setup=([\w-]+)/);
-    if (!m) return toast('That isn’t a Daywell setup link.');
+  if (act === 'sign-in') {
+    store.setDevice({ localOnly: false });
     $('#settings').close();
-    return applySetup(m[1]);
+    return render();
   }
-  if (act === 'qr-show' || act === 'qr-hide') {
-    ui.phoneCode = act === 'qr-show';
-    renderSettings();
-    if (ui.phoneCode) $('#st-phone')?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  if (act === 'save-phrase') {
+    const v = ($('#st-phrase')?.value || '').trim();
+    const out = $('#st-phrase-status');
+    if (v.length < 4) {
+      out.className = 'st-status err';
+      out.textContent = 'Use at least 4 characters.';
+      return;
+    }
+    out.className = 'st-status';
+    out.textContent = 'Saving…';
+    try {
+      const claude = $('#st-phrase-claude')?.checked ? store.device.apiKey : '';
+      const r = await google.setPhrase(v, claude);
+      ui.phrase = { set: true, claude: !!r.claude };
+      renderSettings();
+      toast('Sign-in key saved');
+    } catch (e) {
+      out.className = 'st-status err';
+      out.textContent = e.message;
+    }
     return;
+  }
+  if (act === 'sign-out') {
+    const ok = await confirmBox({ title: 'Sign out of this device?', body: 'This device forgets your tasks, calendar and keys. Everything stays safe in your Google script; type your key to come back.', ok: 'Sign out', cancel: 'Stay signed in', danger: true });
+    if (!ok) return;
+    store.setDevice({ gsUrl: '', gsSecret: '', apiKey: '', syncRev: null, lastSync: 0, localOnly: false });
+    store.replaceState({ ...store.state, tasks: [], log: [], meta: { order: {}, plans: {}, dismiss: {}, timer: null, seeded: true } }, 'change');
+    google.clear();
+    store.undoStack.length = 0;
+    store.redoStack.length = 0;
+    ui.phrase = null;
+    const k = $('#st-key');
+    if (k) k.value = '';
+    $('#settings').close();
+    return render();
   }
   if (act === 'disconnect') {
     const ok = await confirmBox({ title: 'Disconnect Google?', body: 'Calendar and sync stop on this device until you reconnect, which takes a few steps. Your tasks stay here and in your Google script.', ok: 'Disconnect', cancel: 'Keep connected', danger: true });
@@ -1774,10 +1908,6 @@ function saveKeyField() {
 }
 
 function onSettingsChange(e) {
-  if (e.target.id === 'st-qrkey') {
-    ui.qrKey = e.target.checked;
-    return drawPhoneCode();
-  }
   const el = e.target;
   if (el.id === 'st-key' || el.id === 'st-model') {
     // Update in place: re-rendering here would swallow the click that caused the blur.
@@ -1888,59 +2018,6 @@ function applyTheme() {
 }
 
 const SCRIPT_PREFIX = 'https://script.google.com/macros/s/';
-
-// A link that sets up another device: your Google script (and, if you like, your Claude key).
-function setupLink({ key = false } = {}) {
-  const dv = store.device;
-  const p = {};
-  if (dv.gsUrl && dv.gsSecret) {
-    const id = dv.gsUrl.startsWith(SCRIPT_PREFIX) && dv.gsUrl.endsWith('/exec') ? dv.gsUrl.slice(SCRIPT_PREFIX.length, -5) : '';
-    if (/^[\w-]+$/.test(id)) p.d = id;
-    else p.u = dv.gsUrl;
-    p.s = dv.gsSecret;
-  }
-  if (key && dv.apiKey) p.k = dv.apiKey;
-  if (dv.model && dv.model !== 'claude-sonnet-5-5') p.m = dv.model;
-  if (dv.effort && dv.effort !== 'medium') p.e = dv.effort;
-  return `${location.origin}${location.pathname}${Object.keys(p).length ? `#setup=${b64urlEncode(JSON.stringify(p))}` : ''}`;
-}
-
-async function drawPhoneCode() {
-  const box = $('#st-qr');
-  if (!box) return;
-  const link = setupLink({ key: ui.qrKey !== false });
-  try {
-    const { default: qrcode } = await import('./vendor/qrcode.mjs');
-    const qr = qrcode(0, 'L');
-    qr.addData(link);
-    qr.make();
-    const n = qr.getModuleCount();
-    let d = '';
-    for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + 4} ${r + 4}h1v1h-1z`;
-    box.innerHTML = `<svg viewBox="0 0 ${n + 8} ${n + 8}" role="img" aria-label="Code that opens Daywell on your phone" shape-rendering="crispEdges"><rect width="${n + 8}" height="${n + 8}" fill="#fff"/><path d="${d}" fill="#000"/></svg>`;
-  } catch {
-    box.innerHTML = '<p class="muted-note">The code couldn’t be drawn. Use Copy setup link in the Google section instead.</p>';
-  }
-}
-
-async function pasteSetup() {
-  let text = '';
-  try {
-    text = await navigator.clipboard.readText();
-  } catch {
-    /* the browser said no; fall back to the paste box */
-  }
-  const m = String(text || '').match(/#setup=([\w-]+)/);
-  if (m) {
-    if ($('#settings').open) $('#settings').close();
-    return applySetup(m[1]);
-  }
-  ui.pasteBox = true;
-  if ($('#settings').open) renderSettings();
-  else openSettings();
-  setTimeout(() => $('#st-paste')?.focus(), 250);
-  toast('Paste your setup link in the box, then tap Set up.');
-}
 
 async function handleSetupLink() {
   const m = location.hash.match(/^#setup=([\w-]+)/);
@@ -2349,8 +2426,15 @@ function onClick(e) {
     case 'menu':
       if (menuAnchor === a) return;
       return id && openMenu(a, id, li?.dataset.day);
-    case 'paste-setup':
-      return pasteSetup();
+    case 'gate-skip':
+      store.setDevice({ localOnly: true });
+      return render();
+    case 'agenda':
+      ui.agendaAll = !ui.agendaAll;
+      return render();
+    case 'brief-more':
+      a.closest('.brief')?.classList.toggle('open');
+      return;
     case 'tip-ok':
       store.setDevice({ tipGestures: true });
       return render();
@@ -2415,6 +2499,11 @@ function onClick(e) {
     case 'target':
       store.setDevice({ addTarget: store.device.addTarget === 'day' ? 'anytime' : 'day' });
       return renderComposerMeta();
+    case 'mode':
+      ui.modeOverride = a.dataset.v;
+      renderParseChips();
+      if (!coarse()) $('#input').focus();
+      return;
     case 'ask':
       return askClaude();
     case 'seed': {
@@ -2652,15 +2741,15 @@ function bindEvents() {
   input.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
       e.preventDefault();
-      if (e.metaKey || e.ctrlKey) askClaude();
-      else addFromInput();
+      if ((e.metaKey || e.ctrlKey) && store.device.apiKey) askClaude();
+      else send();
     }
   });
   // Tapping + keeps the keyboard up, so you can add several tasks in a row.
   $('#addBtn').addEventListener('mousedown', (e) => e.preventDefault());
   $('#composer').addEventListener('submit', (e) => {
     e.preventDefault();
-    addFromInput();
+    send();
   });
 
   $('#search').addEventListener('input', (e) => {
@@ -2749,11 +2838,10 @@ function bindEvents() {
 function staticChrome() {
   $('#undoBtn').innerHTML = I.undo;
   $('#settingsBtn').innerHTML = I.gear;
-  $('#askBtn').innerHTML = `${I.spark}<span>Ask</span>`;
   $('#addBtn').innerHTML = I.plus;
   for (const s of $$('[data-ico]')) s.innerHTML = I[s.dataset.ico] || '';
   $('#allCol').innerHTML = `<header class="all-head"><h2>Everything else</h2><div class="search">${I.search}<input id="search" type="search" placeholder="Search" aria-label="Search tasks" autocomplete="off"></div></header><div class="area-chips" id="areaChips"></div><div id="allList"></div>`;
-  $('#input').placeholder = isMobile() ? 'Add a task…' : 'Add a task, or paste a list and ask Claude…';
+  $('#input').placeholder = isMobile() ? 'Add a task or a list…' : 'Add a task, or type a whole list for Claude…';
 }
 
 function boot() {
@@ -2798,7 +2886,7 @@ function boot() {
       google.sync();
       google.refreshEvents();
     }
-  }, 120000);
+  }, 60000);
   if (google.configured) {
     const first = Promise.allSettled([google.sync(), google.refreshEvents(true)]);
     Promise.race([first, new Promise((r) => setTimeout(r, 6000))]).then(() => maybeAutoPlan());

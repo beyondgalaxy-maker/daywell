@@ -2285,91 +2285,187 @@ dialog::backdrop {
 }
 
 
-/* ---------- linking a phone ---------- */
-.qr-wrap {
-  display: flex;
-  gap: 20px;
-  align-items: flex-start;
-  margin-top: 12px;
+/* ---------- sign in with your key ---------- */
+.gated body > *:not(#gate):not(dialog) {
+  visibility: hidden;
 }
-.qr {
-  flex-shrink: 0;
-  width: 232px;
-  height: 232px;
-  padding: 8px;
-  border-radius: 14px;
-  background: #fff;
-  box-shadow: inset 0 0 0 1px var(--line-2);
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: max(24px, env(safe-area-inset-top)) 24px max(24px, env(safe-area-inset-bottom));
+  background: var(--paper);
+  overflow-y: auto;
 }
-.qr svg {
-  display: block;
-  width: 100%;
-  height: 100%;
-  stroke: none;
-}
-.qr svg rect {
-  fill: #fff;
-}
-.qr svg path {
-  fill: #000;
-}
-.qr-side {
+.gate-card {
+  width: min(340px, 100%);
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 10px;
-  min-width: 0;
+  align-items: stretch;
+  gap: 12px;
+  margin-bottom: 8vh;
 }
-.qr-side p {
-  margin: 0;
+.gate-mark {
+  width: 56px;
+  height: 56px;
+  align-self: center;
 }
-.qr-side .toggle-row {
-  align-items: flex-start;
-  padding-top: 0;
+.gate h1 {
+  text-align: center;
+  font-size: 40px;
+  line-height: 1;
+  font-weight: 760;
+  letter-spacing: -0.025em;
+  font-variation-settings: 'wdth' 75, 'opsz' 96;
+  margin: 4px 0 18px;
 }
-.qr-side .toggle-row input {
-  margin-top: 3px;
+.gate .inp {
+  height: 52px;
+  padding: 0 16px;
+  font-size: 18px;
+  border-radius: 14px;
+  text-align: center;
 }
-.paste-row {
-  display: flex;
-  gap: 8px;
+.gate .btn {
+  height: 50px;
+  font-size: 17px;
+  border-radius: 14px;
+  justify-content: center;
+}
+.gate-err {
+  min-height: 1.4em;
+  text-align: center;
+  font-size: 14px;
+  color: var(--danger);
+}
+.gate-skip {
+  align-self: center;
+  font-size: 13px;
+  color: var(--faint);
+  padding: 8px;
+}
+.st-more {
   margin-top: 12px;
 }
-.paste-row .inp {
-  flex: 1;
-  min-width: 0;
+.st-more summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 14px;
 }
-.w-link {
+.st-more[open] summary {
+  margin-bottom: 10px;
+}
+
+/* ---------- smart send ---------- */
+.add-btn.ai {
+  background: var(--spruce);
+  color: var(--paper);
+}
+.add-btn.busy svg {
+  animation: spin 1.6s linear infinite;
+}
+.chips .pc.ai {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.chips .pc.mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: inset 0 0 0 1px var(--line);
+  font-weight: 560;
+}
+.chips .pc.mode:hover {
+  color: var(--ink);
+}
+
+/* ---------- phone agenda ---------- */
+.agenda {
+  margin-top: 14px;
+}
+.agenda ul {
   display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 10px 12px;
-  margin: -4px 0 18px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  background: var(--spruce-soft);
+  flex-direction: column;
+  gap: 2px;
 }
-.w-link > svg {
-  flex-shrink: 0;
-  width: 20px;
-  height: 20px;
-  margin-top: 2px;
+.ag {
+  display: grid;
+  grid-template-columns: 48px 4px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  min-height: 30px;
+  font-size: 14.5px;
+}
+.ag b {
+  font-weight: 620;
+  font-size: 13px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.ag i {
+  align-self: stretch;
+  margin: 5px 0;
+  border-radius: 2px;
+  background: var(--ev, var(--spruce));
+}
+.ag span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+.ag.now b {
   color: var(--spruce);
 }
-.w-link p {
-  flex: 1;
-  min-width: 0;
-  margin: 0 !important;
-  font-size: 14px;
-  line-height: 1.45;
+.ag.now span {
+  color: var(--ink);
+  font-weight: 600;
 }
-.w-link .btn {
-  margin-left: 32px;
+.ag.past {
+  opacity: 0.45;
 }
-@media (max-width: 620px) {
-  .qr-wrap {
-    flex-direction: column;
-  }
+.ag.opt i {
+  opacity: 0.45;
+}
+.ag-days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ag-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 3px 10px 3px 8px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: var(--surface);
+  color: var(--ink-2);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.ag-day i {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ev, var(--spruce));
+}
+.ag-more {
+  margin: 4px 0 0 58px;
+  font-size: 13px;
+  font-weight: 560;
+  color: var(--muted);
+  padding: 4px 0;
 }
 
 /* ---------- touch: swipes, holds, sheets ---------- */
@@ -2747,6 +2843,29 @@ dialog::backdrop {
   }
   .meta .m-area {
     display: none;
+  }
+  /* less text on a small screen */
+  .sync-state span {
+    display: none;
+  }
+  .day-title {
+    font-size: 40px;
+  }
+  .cheer-sub span:not(:first-child) {
+    display: none;
+  }
+  .sug .why {
+    display: none;
+  }
+  .brief .b-text {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .brief.open .b-text {
+    display: block;
   }
   /* rows: one tidy second line with "Up next", the time and Start */
   .sub .next-tag {

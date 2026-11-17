@@ -58,12 +58,11 @@
     <div class="ai-panel" id="aiPanel" hidden aria-live="polite"></div>
     <form class="composer" id="composer" autocomplete="off">
       <label class="sr-only" for="input">Add a task</label>
-      <textarea id="input" rows="1" placeholder="Add a task…" enterkeyhint="done" spellcheck="true"></textarea>
+      <textarea id="input" rows="1" placeholder="Add a task…" enterkeyhint="send" spellcheck="true"></textarea>
       <div class="composer-row">
         <div class="chips" id="parseChips" aria-live="polite"></div>
         <div class="composer-actions">
           <button type="button" class="target-btn" id="targetBtn" data-act="target" title="Where new tasks go"></button>
-          <button type="button" class="ask-btn" id="askBtn" data-act="ask" title="Ask Claude (Ctrl/⌘ Enter)"></button>
           <button type="submit" class="add-btn" id="addBtn" aria-label="Add task" title="Add (Enter)"></button>
         </div>
       </div>

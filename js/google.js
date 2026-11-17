@@ -68,6 +68,9 @@ function dedupe(list) {
   return [...seen.values()];
 }
 
+// Your own Daywell script (it only answers to your device key or your sign-in key).
+export const HOME_SCRIPT = 'https://script.google.com/macros/s/AKfycbwAKayPxTlOzFdFUTossoiWAacO61lw3izZAt4H2Q9h95XBZ1oInL7yV2ptgMo7QDvsMA/exec';
+
 export class Google {
   constructor(store) {
     this.store = store;
@@ -124,6 +127,30 @@ export class Google {
 
   ping() {
     return this.request('ping');
+  }
+  // Another device signs in with the sign-in key; the script hands back the device key.
+  async signIn(phrase) {
+    const url = this.store.device.gsUrl || HOME_SCRIPT;
+    let res;
+    try {
+      res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ action: 'login', phrase }) });
+    } catch {
+      throw new Error('Couldn’t reach your Daywell. Check your connection and try again.');
+    }
+    let j;
+    try {
+      j = await res.json();
+    } catch {
+      throw new Error('Your Daywell didn’t answer. Try again in a moment.');
+    }
+    if (!j.ok || !j.secret) throw new Error(j.error || 'That key didn’t work.');
+    return { url, secret: j.secret, claudeKey: j.claudeKey || '' };
+  }
+  setPhrase(phrase, claudeKey = '') {
+    return this.request('setPhrase', { phrase, claudeKey }, true);
+  }
+  phraseInfo() {
+    return this.request('phrase');
   }
   // First connection registers this device's key with the script (later devices use a setup link).
   claim() {
