@@ -38,7 +38,17 @@ function normEvent(ev) {
       o.endDay = E.addDays(o.endDay, 1);
       delete o.start;
       delete o.end;
-    } else if (mins <= 0) o.free = true;
+    } else if (mins <= 0) {
+      const st = new Date(o.start);
+      if (st.getHours() === 0 && st.getMinutes() === 0) {
+        // Zero-length midnight entries (like birthdays) are all-day notes.
+        o.allDay = true;
+        o.startDay = E.keyFromDate(st);
+        o.endDay = E.addDays(o.startDay, 1);
+        delete o.start;
+        delete o.end;
+      } else o.free = true;
+    }
   }
   if (o.allDay) {
     if (!E.isKey(o.startDay)) return null;
