@@ -157,13 +157,15 @@ export class Store {
 
   /* ---------- transactions with item-level undo ---------- */
   // Undo restores only the items a step touched, so edits synced from other devices survive.
-  transact(label, fn, { undoable = true } = {}) {
+  // `meta` rides along with the undo step (for example the text the person typed), so the UI can
+  // put things back where they came from when the step is undone.
+  transact(label, fn, { undoable = true, meta = null } = {}) {
     const before = undoable ? clone({ tasks: this.state.tasks, log: this.state.log, meta: this.state.meta }) : null;
     const result = fn(this.state);
     if (undoable) {
       const diff = diffStates(before, this.state);
       if (diff.count) {
-        this.undoStack.push({ label, diff });
+        this.undoStack.push({ label, diff, meta });
         if (this.undoStack.length > 80) this.undoStack.shift();
         this.redoStack = [];
       }
@@ -182,6 +184,7 @@ export class Store {
     this.redoStack.push(step);
     this.persist();
     this.emit('change');
+    this.onStep?.('undo', step);
     return step.label;
   }
   redo() {
@@ -191,11 +194,12 @@ export class Store {
     this.undoStack.push(step);
     this.persist();
     this.emit('change');
+    this.onStep?.('redo', step);
     return step.label;
   }
 
   /* ---------- task changes ---------- */
-  addTasks(list, { label, src = 'manual' } = {}) {
+  addTasks(list, { label, src = 'manual', meta = null } = {}) {
     const today = this.today;
     const made = [];
     this.transact(label || (list.length === 1 ? `Added “${E.cleanTitle(list[0].title)}”` : `Added ${list.length} tasks`), (s) => {
@@ -204,7 +208,7 @@ export class Store {
         s.tasks.push(t);
         made.push(t);
       }
-    });
+    }, { meta });
     return made;
   }
   updateTask(id, changes, { label, undoable = true } = {}) {

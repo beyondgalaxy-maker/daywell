@@ -13,6 +13,16 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const isMobile = () => matchMedia('(max-width: 860px)').matches;
+const coarse = () => matchMedia('(pointer: coarse)').matches;
+const lc = (l) => (/^Claude/.test(l) ? String(l) : String(l || '').charAt(0).toLowerCase() + String(l || '').slice(1));
+// A short tap of haptics on phones that support it (Android). Silently does nothing elsewhere.
+const buzz = (ms = 10) => {
+  try {
+    if (coarse()) navigator.vibrate?.(ms);
+  } catch {
+    /* not supported */
+  }
+};
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 const MOD = isMac ? '⌘' : 'Ctrl';
 
@@ -38,6 +48,7 @@ const ui = {
   toastTimer: null,
   syncTimer: null,
   menuFor: null,
+  restored: null,
 };
 
 /* ================================================================== */
@@ -68,10 +79,12 @@ function lastStep() {
   return store.undoStack[store.undoStack.length - 1] || null;
 }
 function revertStep(step) {
-  if (!step) return;
+  if (!step) return null;
   const i = store.undoStack.indexOf(step);
   if (i > -1) store.undoStack.splice(i, 1);
-  store.transact(`Undid ${step.label}`, (s) => {
+  const before = store.undoStack.length;
+  const label = step.meta?.reverts ? step.meta.reverts.label : `Undid ${lc(step.label)}`;
+  store.transact(label, (s) => {
     for (const ch of step.diff.tasks) {
       const j = s.tasks.findIndex((x) => x.id === ch.id);
       const v = ch.before ? { ...JSON.parse(JSON.stringify(ch.before)), updatedAt: Date.now() } : { ...E.purgedShell(ch.after), updatedAt: Date.now() };
@@ -86,7 +99,85 @@ function revertStep(step) {
     }
     for (const ch of step.diff.order) s.meta.order[ch.k] = ch.before ? { ...ch.before, at: Date.now() } : { ids: [], at: Date.now(), cleared: true };
     for (const ch of step.diff.plans) s.meta.plans[ch.k] = ch.before ? { ...ch.before, at: Date.now() } : { removed: true, at: Date.now() };
-  });
+  }, { meta: { reverts: step } });
+  stepUndone(step);
+  return store.undoStack.length > before ? lastStep() : null;
+}
+
+/* ---------- undo puts your words back ---------- */
+// Steps that came from the composer remember what was typed. Undoing them puts the text back
+// in the box (nothing you wrote disappears); redoing takes it out again.
+// Undoing an "undo" is a redo of the original (and so on), so follow the chain to the real step.
+function resolveStep(step, kind) {
+  let s = step;
+  let k = kind;
+  while (s?.meta?.reverts) {
+    s = s.meta.reverts;
+    k = k === 'undo' ? 'redo' : 'undo';
+  }
+  return { s, k };
+}
+function backMessage(step, kind) {
+  const { s, k } = resolveStep(step, kind);
+  if (k !== 'undo' || !s?.meta?.input) return null;
+  return s.meta.mode === 'ask' ? 'Undone. Your message is back in the box.' : 'Undone. Your text is back in the box.';
+}
+function stepUndone(step) {
+  if (!step) return;
+  if (step.meta?.reverts) return stepRedone(step.meta.reverts);
+  if (ui.ai && ui.ai.status !== 'busy' && ui.ai.step === step) {
+    ui.ai = null;
+    renderAIPanel();
+  }
+  if (step.meta?.input) restoreComposer(step.meta);
+}
+function stepRedone(step) {
+  if (!step) return;
+  if (step.meta?.reverts) return stepUndone(step.meta.reverts);
+  if (step.meta?.input) clearComposer(step.meta);
+  if (step.meta?.ai && (!ui.ai || ui.ai.status !== 'busy')) {
+    ui.ai = step.meta.ai;
+    renderAIPanel();
+  }
+}
+function restoreComposer({ input: text, mode }) {
+  const el = $('#input');
+  if (!text) return;
+  if (!el.value.includes(text)) el.value = el.value.trim() ? `${el.value.replace(/\s+$/, '')}\n${text}` : text;
+  ui.restored = { text, mode };
+  autoGrow();
+  renderParseChips();
+  const box = $('#composer');
+  box.classList.remove('restored');
+  void box.offsetWidth;
+  box.classList.add('restored');
+  // On a computer, put the cursor at the end so it's ready to edit. On a phone, don't pop the keyboard.
+  if (!coarse()) {
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  }
+}
+function clearComposer({ input: text }) {
+  const el = $('#input');
+  if (!text || !el.value.includes(text)) return;
+  el.value = el.value.trim() === text.trim() ? '' : el.value.replace(`\n${text}`, '').replace(text, '').trim();
+  if (ui.restored?.text === text) ui.restored = null;
+  autoGrow();
+  renderParseChips();
+}
+function undoLast() {
+  const step = lastStep();
+  const l = store.undo();
+  if (!l) return toast('Nothing to undo');
+  toast(backMessage(step, 'undo') || `Undid ${lc(l)}`, { label: 'Redo', run: redoLast });
+}
+function redoLast() {
+  const l = store.redo();
+  if (l) toast(`Redid ${lc(l)}`, { label: 'Undo', run: undoLast });
+}
+function undoWithToast(step) {
+  const undid = revertStep(step);
+  toast(backMessage(step, 'undo') || 'Undone', undid ? { label: 'Redo', run: () => revertStep(undid) } : null);
 }
 
 /* ================================================================== */
@@ -98,8 +189,8 @@ function toast(msg, action) {
   el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button">${esc(action.label)}</button>` : ''}`;
   el.hidden = false;
   if (action) el.querySelector('button').onclick = () => {
-    action.run();
     hideToast();
+    action.run();
   };
   clearTimeout(ui.toastTimer);
   ui.toastTimer = setTimeout(hideToast, action ? 6500 : 3200);
@@ -108,7 +199,7 @@ function hideToast() {
   $('#toast').hidden = true;
 }
 function undoToast(msg, step) {
-  toast(msg, step ? { label: 'Undo', run: () => revertStep(step) } : null);
+  toast(msg, step ? { label: 'Undo', run: () => undoWithToast(step) } : null);
 }
 
 function confirmBox({ title, body = '', ok = 'OK', cancel = 'Cancel', danger = false }) {
@@ -236,7 +327,8 @@ function taskRow(it, ctx, place = 'day', opts = {}) {
   const done = st === 'done';
   const timing = ctx.timer?.id === t.id;
   const cls = ['task', `p${t.priority}`, done && 'done', st === 'skip' && 'skipped', st === 'miss' && 'missed', t.optional && 'optional', timing && 'timing', opts.next && 'up-next'].filter(Boolean).join(' ');
-  const sub = (opts.next ? `<span class="next-tag${opts.bonus ? ' bonus' : ''}">${opts.bonus ? 'Bonus' : 'Up next'}</span>` : '') + subline(it, ctx, place);
+  const tag = opts.next ? `<span class="next-tag${opts.bonus ? ' bonus' : ''}">${opts.bonus ? 'Bonus' : 'Up next'}</span>` : '';
+  const sub = tag + subline(it, ctx, place);
   const start = opts.next && !timing ? `<button type="button" class="start-btn" data-act="start" aria-label="Start a timer for “${esc(t.title)}”">${I.play}<span>Start</span></button>` : '';
   const label = done || st === 'skip' ? `Mark “${t.title}” not done` : `Mark “${t.title}” done`;
   const quick = (place === 'all' || place === 'later') && !done ? `<button type="button" class="quick" data-act="to-today" title="Do today" aria-label="Do “${esc(t.title)}” today">${I.sun}</button>` : '';
@@ -244,7 +336,7 @@ function taskRow(it, ctx, place = 'day', opts = {}) {
 <span class="grip" aria-hidden="true">${I.grip}</span>
 <button type="button" class="check" data-act="check" aria-label="${esc(label)}" aria-pressed="${done}">${I.tick}</button>
 <div class="body" data-act="open" role="button" tabindex="0"><span class="title">${esc(t.title)}</span>${sub ? `<span class="sub">${sub}</span>` : ''}</div>
-<div class="meta">${metaBits(it, ctx, place)}${start}</div>${quick}
+<div class="meta">${tag.replace('class="next-tag', 'class="next-tag nt-m')}${metaBits(it, ctx, place)}${start}</div>${quick}
 <button type="button" class="more" data-act="menu" aria-haspopup="menu" aria-label="Options for “${esc(t.title)}”">${I.more}</button>
 </li>`;
 }
@@ -288,6 +380,8 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   // One clear next step: the first must-do; once those are done, optional ones become a bonus.
   const nextItem = isToday ? open.find((i) => !i.dueOnly && !i.t.optional) || open.find((i) => !i.dueOnly) : null;
   const bonus = !!nextItem?.t.optional;
+  // A one-time hint so the phone gestures are discoverable.
+  if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe a task right when it’s done, or left to put it off. Press and hold to reorder.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
   html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${open.map((i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus })).join('')}${!open.length && !showWelcome ? `<li class="empty-drop">${isPast ? 'Nothing else was planned for this day.' : isToday ? (prog.doneN ? 'Everything on today’s list is done. Pick something from Worth doing today if you feel like more.' : 'Nothing planned yet. Add a task below, or drag one in from Everything else.') : 'Nothing planned yet. Drag tasks here to plan them for this day.'}</li>` : ''}</ul>`;
   if (isToday) html += suggestionsHtml(ctx, items);
   if (missed.length) html += `<h3 class="list-head">Not done <span class="n">${missed.length}</span></h3><ul class="tasks soft" data-list="none">${missed.map((i) => taskRow(i, ctx, 'past')).join('')}</ul>`;
@@ -657,17 +751,26 @@ function renderComposerMeta() {
 function renderParseChips() {
   const v = $('#input').value;
   const el = $('#parseChips');
+  if (ui.restored && !v.includes(ui.restored.text)) ui.restored = null;
+  const r = ui.restored;
+  if (r?.mode === 'ask') {
+    el.innerHTML = `<span class="pc back">${I.undo}Your message is back. Edit it, then ${coarse() ? 'tap Ask' : `${MOD}↵ to ask`} again</span>`;
+    return;
+  }
+  const back = r ? `<span class="pc back">${I.undo}Back from undo</span>` : '';
   if (!v.trim()) {
     el.innerHTML = `<span class="hint"><span><kbd>↵</kbd>Add</span><span><kbd>${MOD} ↵</kbd>Ask Claude</span><span><kbd>⇧ ↵</kbd>New line</span></span>`;
     return;
   }
   const lines = v.split('\n').filter((l) => l.trim());
   if (lines.length > 1) {
-    el.innerHTML = `<span class="pc">${lines.length} tasks</span><span class="hint"><span>Enter adds each line</span><span>${MOD}+Enter lets Claude sort them</span></span>`;
+    el.innerHTML = `${back}<span class="pc">${lines.length} tasks</span><span class="hint"><span>Enter adds each line</span><span>${MOD}+Enter lets Claude sort them</span></span>`;
     return;
   }
   const p = E.parseQuick(v, store.today, { weekStart: store.settings.weekStart });
-  el.innerHTML = p.chips.map((c) => `<span class="pc">${esc(c.label)}</span>`).join('');
+  const n = v.split(/,|;/).filter((x) => x.trim().length > 1).length;
+  const listHint = n >= 3 ? `<span class="pc soft">${I.spark}Looks like ${n} things. ${coarse() ? 'Tap Ask' : `${MOD}↵`} to split them up</span>` : '';
+  el.innerHTML = back + (listHint || p.chips.map((c) => `<span class="pc">${esc(c.label)}</span>`).join(''));
 }
 
 function autoGrow() {
@@ -750,7 +853,64 @@ function openDrawer(id) {
 function closeDrawer() {
   ui.drawer = null;
   $('#drawer').hidden = true;
-  $('#scrim').hidden = true;
+  $('#drawer').style.transform = '';
+  if ($('#menu').hidden) $('#scrim').hidden = true;
+}
+
+/* ---------- phone helpers: sheets you can swipe down, a composer that rides the keyboard ---------- */
+
+function sheetDrag(sheet, handle, close) {
+  let st = null;
+  sheet.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' || !isMobile()) return;
+    if (!e.target.closest(handle) || e.target.closest('button, input, textarea, select, a')) return;
+    st = { y0: e.clientY, t0: e.timeStamp, pid: e.pointerId, dy: 0 };
+  });
+  sheet.addEventListener('pointermove', (e) => {
+    if (!st || e.pointerId !== st.pid) return;
+    st.dy = Math.max(0, e.clientY - st.y0);
+    sheet.style.transition = 'none';
+    sheet.style.transform = `translateY(${st.dy}px)`;
+  });
+  const end = (e) => {
+    if (!st || e.pointerId !== st.pid) return;
+    const fast = st.dy > 30 && st.dy / Math.max(1, e.timeStamp - st.t0) > 0.5;
+    const go = e.type !== 'pointercancel' && (st.dy > 110 || fast);
+    st = null;
+    sheet.style.transition = 'transform 0.2s ease';
+    sheet.style.transform = go ? 'translateY(105%)' : '';
+    setTimeout(() => {
+      sheet.style.transition = '';
+      if (go) close();
+      sheet.style.transform = '';
+    }, 200);
+  };
+  sheet.addEventListener('pointerup', end);
+  sheet.addEventListener('pointercancel', end);
+}
+
+// Phones: keep the composer (and any open sheet) just above the on-screen keyboard, and hide the
+// tab bar while typing. Works with iOS (visual viewport) and Android (resizes-content).
+function watchViewport() {
+  const vv = window.visualViewport;
+  const root = document.documentElement;
+  let raf = 0;
+  const update = () => {
+    raf = 0;
+    const kb = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+    root.style.setProperty('--kb', `${kb}px`);
+    if (vv) root.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
+    const ae = document.activeElement;
+    root.classList.toggle('kb-open', coarse() && isMobile() && !!ae?.closest?.('#dock') && ae.matches('textarea, input'));
+  };
+  const soon = () => {
+    if (!raf) raf = requestAnimationFrame(update);
+  };
+  vv?.addEventListener('resize', soon);
+  vv?.addEventListener('scroll', soon);
+  document.addEventListener('focusin', soon);
+  document.addEventListener('focusout', () => setTimeout(soon, 80));
+  update();
 }
 
 function renderDrawer() {
@@ -793,7 +953,7 @@ function renderDrawer() {
   const gcal = google.configured
     ? `<div class="field"><span class="label">Calendar</span><div><div class="row"><input class="inp" type="date" id="gcDate" value="${t.date && t.date >= today ? t.date : today}"><input class="inp" type="time" id="gcTime" value="${t.time || nextHalfHour()}"><button type="button" class="chip-btn" data-dr="gcal">${I.calendar}Block ${E.fmtMins(E.estMid(t) || 30)}</button></div><p class="dr-hint">Adds a busy block to your Google Calendar.</p></div></div>`
     : '';
-  $('#drawer').innerHTML = `<div class="dr-head"><span class="grow">${t.src === 'ai' ? 'Added by Claude' : 'Added'} ${esc(relWord(E.keyFromMs(t.createdAt || Date.now()), today))}${t.bumps ? `, pushed back ${t.bumps} time${t.bumps === 1 ? '' : 's'}` : ''}</span><button type="button" class="icon-btn sm" data-dr="close" aria-label="Close details">${I.x}</button></div>
+  $('#drawer').innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><div class="dr-head"><span class="grow">${t.src === 'ai' ? 'Added by Claude' : 'Added'} ${esc(relWord(E.keyFromMs(t.createdAt || Date.now()), today))}${t.bumps ? `, pushed back ${t.bumps} time${t.bumps === 1 ? '' : 's'}` : ''}</span><button type="button" class="icon-btn sm" data-dr="close" aria-label="Close details">${I.x}</button></div>
 <div class="dr-body">
 <textarea class="dr-title" data-f="title" rows="1" aria-label="Title">${esc(t.title)}</textarea>
 <div class="dr-done"><button type="button" class="chip-btn${doneToday ? ' on' : ''}" data-dr="toggle-done">${I.tick}${doneToday ? (rep ? 'Done today' : 'Done') : rep ? 'Mark done today' : 'Mark done'}</button>
@@ -901,16 +1061,17 @@ function openMenu(anchor, id, day) {
   ];
   const timing = store.state.meta.timer?.id === id;
   const m = $('#menu');
-  m.innerHTML = `<div class="m-pris" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-m="pri" data-v="${p}" aria-pressed="${t.priority === p}" title="${E.PRIORITY_NAMES[p]}">P${p}</button>`).join('')}</div>
-${opts.map(([l, v]) => `<button type="button" class="mi" role="menuitem" data-m="move" data-v="${v}">${l === 'Today' ? I.sun : I.calendar}${l}<small>${E.fmtShortDate(v)}</small></button>`).join('')}
+  m.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><div class="m-pris" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-m="pri" data-v="${p}" aria-pressed="${t.priority === p}" title="${E.PRIORITY_NAMES[p]}">P${p}</button>`).join('')}</div>
+${rep?.kind === 'daily' ? '' : `${opts.map(([l, v]) => `<button type="button" class="mi" role="menuitem" data-m="move" data-v="${v}">${l === 'Today' ? I.sun : I.calendar}${l}<small>${E.fmtShortDate(v)}</small></button>`).join('')}
 <div class="m-date"><input type="date" class="inp" data-m="pick" aria-label="Pick a date" min="${today}"></div>
-<button type="button" class="mi" role="menuitem" data-m="move" data-v="">${I.x}${rep ? 'Back to its usual schedule' : 'No date'}</button><hr>
+<button type="button" class="mi" role="menuitem" data-m="move" data-v="">${I.x}${rep ? 'Back to its usual schedule' : 'No date'}</button><hr>`}
 ${rep && inToday ? `<button type="button" class="mi" role="menuitem" data-m="skip">${I.skip}Skip today</button>` : ''}
 <button type="button" class="mi" role="menuitem" data-m="timer">${timing ? `${I.stop}Stop timer` : `${I.play}Start timer`}</button>
 <button type="button" class="mi" role="menuitem" data-m="open">${I.list}Details</button>
 <button type="button" class="mi" role="menuitem" data-m="dup">${I.dup}Duplicate</button>
 <button type="button" class="mi danger" role="menuitem" data-m="delete">${I.trash}Delete</button>`;
   m.hidden = false;
+  if (isMobile()) $('#scrim').hidden = false;
   ui.menuFor = { id, day, anchor };
   anchor.setAttribute('aria-expanded', 'true');
   if (!isMobile()) {
@@ -929,6 +1090,8 @@ function closeMenu() {
   const m = $('#menu');
   if (m.hidden) return;
   m.hidden = true;
+  m.style.transform = '';
+  if (!ui.drawer) $('#scrim').hidden = true;
   ui.menuFor?.anchor?.setAttribute('aria-expanded', 'false');
   ui.menuFor = null;
 }
@@ -1023,8 +1186,9 @@ function addFromInput() {
     if (!f.date && !f.repeat && D) f.date = D;
     return f;
   });
-  const made = store.addTasks(list);
+  const made = store.addTasks(list, { meta: { input: raw, mode: 'add' } });
   input.value = '';
+  ui.restored = null;
   autoGrow();
   renderParseChips();
   if (ui.ai && ui.ai.status !== 'busy' && !ui.ai.questions?.some((q) => !q.answer)) {
@@ -1057,6 +1221,8 @@ async function askClaude(textArg) {
     autoGrow();
     renderParseChips();
   }
+  // On a phone, put the keyboard away so Claude's answer has room.
+  if (coarse() && document.activeElement === input) input.blur();
   const ctrl = new AbortController();
   ui.ai = { status: 'busy', text, startedAt: Date.now(), ctrl };
   renderAIPanel();
@@ -1075,8 +1241,10 @@ async function askClaude(textArg) {
       maxTokens: 12000,
       signal: ctrl.signal,
     });
-    const result = applyCommand(r.data, ids);
+    const result = applyCommand(r.data, ids, text);
     ui.ai = { status: 'done', text, result, step: result.step, questions: result.questions, showDetails: false };
+    if (result.step) result.step.meta.ai = ui.ai;
+    if (ui.restored?.text === text) ui.restored = null;
   } catch (e) {
     if (e.code === 'cancelled') {
       ui.ai = null;
@@ -1098,7 +1266,7 @@ async function askClaude(textArg) {
   renderComposerMeta();
 }
 
-function applyCommand(data, ids) {
+function applyCommand(data, ids, text = '') {
   const today = store.today;
   const refs = new Map();
   const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null };
@@ -1148,7 +1316,7 @@ function applyCommand(data, ids) {
       t.updatedAt = Date.now();
       out.removed.push(id);
     }
-  });
+  }, { meta: { input: text, mode: 'ask' } });
   if (store.undoStack.length > before) out.step = lastStep();
   for (const q of data.questions || []) {
     const taskId = refs.get(String(q.target).trim()) || ids.long(q.target);
@@ -1349,6 +1517,24 @@ function openSettings(focus) {
   }
 }
 
+function phoneSection() {
+  const standalone = matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const install = standalone
+    ? '<p>Daywell is installed on this device.</p>'
+    : ui.installPrompt
+      ? `<p>Install Daywell so it opens full screen from your home screen, like an app.</p><div class="row" style="margin-top:10px"><button type="button" class="btn" data-st="install">${I.download}Install Daywell</button></div>`
+      : ios
+        ? '<p>In Safari, tap <b>Share</b>, then <b>Add to Home Screen</b>. Daywell then opens full screen, like an app.</p>'
+        : coarse()
+          ? '<p>In your browser menu, choose <b>Add to Home screen</b> or <b>Install app</b>. Daywell then opens full screen, like an app.</p>'
+          : `<p>Open <b>${esc(location.host + location.pathname.replace(/index\.html$/, ''))}</b> on your phone and add it to your home screen. If Google is connected, use <b>Copy setup link</b> above to bring your tasks along.</p>`;
+  const gestures = coarse()
+    ? `<div class="kbd-list" style="margin-top:12px"><kbd>Swipe right</kbd><span>Mark a task done</span><kbd>Swipe left</kbd><span>Put it off until tomorrow (daily routines skip today). In Everything else, it brings the task to today.</span><kbd>Hold</kbd><span>Pick it up to reorder</span><kbd>Undo</kbd><span>Takes back the last change. Anything you typed goes back in the box.</span></div>`
+    : '';
+  return `<section class="st-sec" id="st-phone"><h3>On your phone</h3>${install}${gestures}</section>`;
+}
+
 function renderSettings() {
   const dv = store.device;
   const sh = store.state.shared;
@@ -1395,7 +1581,8 @@ function renderSettings() {
 <section class="st-sec" id="st-data"><h3>Your data</h3><p>Everything lives in this browser${g.configured ? ' and your Google script' : ''}. Keep a backup now and then.</p>
 <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn secondary" data-st="export">${I.download}Download backup</button><button type="button" class="btn secondary" data-st="import">${I.upload}Restore from backup</button><input type="file" id="st-file" accept="application/json,.json" hidden>${!store.state.meta.seeded || !store.state.tasks.some((t) => !t.purged && E.STARTER.some((s) => s.title === t.title)) ? `<button type="button" class="btn secondary" data-st="seed">Add my Daywell routines</button>` : ''}<button type="button" class="btn secondary" data-st="wipe" style="color:var(--danger)">${I.trash}Delete all tasks</button></div></section>
 <section class="st-sec"><h3>Appearance</h3><div class="st-row"><label>Theme</label><div class="seg" role="group">${['auto', 'light', 'dark'].map((v) => `<button type="button" data-st="theme" data-v="${v}" aria-pressed="${dv.theme === v}">${v === 'auto' ? 'Match system' : v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div></div></section>
-<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>
+${phoneSection()}
+${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>`}
 <p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
 }
@@ -1403,6 +1590,15 @@ function renderSettings() {
 async function onSettings(act, el) {
   const dv = store.device;
   if (act === 'close') return $('#settings').close();
+  if (act === 'install') {
+    const pr = ui.installPrompt;
+    ui.installPrompt = null;
+    if (pr) {
+      await pr.prompt();
+      await pr.userChoice.catch(() => null);
+    }
+    return renderSettings();
+  }
   if (act === 'showkey') {
     const k = $('#st-key');
     k.type = k.type === 'password' ? 'text' : 'password';
@@ -1690,79 +1886,267 @@ async function handleSetupLink() {
 /* ================================================================== */
 
 const drag = { s: null };
+const touch = { s: null };
 
 function onPointerDown(e) {
   if (e.pointerType === 'mouse' && e.button !== 0) return;
   const li = e.target.closest('li.task');
   if (!li) return;
   const list = li.closest('[data-list]');
-  if (!list || list.dataset.list === 'none') return;
+  if (!list) return;
+  if (e.pointerType !== 'mouse') return touchDown(e, li, list);
+  if (list.dataset.list === 'none') return;
   const onGrip = !!e.target.closest('.grip');
   if (!onGrip && e.target.closest('button, input, textarea, select, a')) return;
-  if (e.pointerType !== 'mouse' && !onGrip) return;
   drag.s = { li, id: li.dataset.id, src: list, x0: e.clientX, y0: e.clientY, started: false, pid: e.pointerId };
   if (onGrip) e.preventDefault();
 }
 
+/* ---------- touch: swipe right to finish, left to move; press and hold to reorder ---------- */
+
+function touchDown(e, li, list) {
+  if (touch.s || drag.s) return;
+  if (e.target.closest('input, textarea, select, .start-btn')) return;
+  const kind = list.dataset.list;
+  const movable = kind === 'day' || kind === 'all';
+  const g = { li, list, id: li.dataset.id, x0: e.clientX, y0: e.clientY, pid: e.pointerId, mode: null, canSwipe: movable && li.dataset.status === 'open', canDrag: movable };
+  if (!g.canSwipe && !g.canDrag) return;
+  touch.s = g;
+  if (g.canDrag) g.timer = setTimeout(() => holdToDrag(g), e.target.closest('.grip') ? 0 : 420);
+}
+
+function holdToDrag(g) {
+  if (touch.s !== g || g.mode) return;
+  g.mode = 'drag';
+  buzz(12);
+  drag.s = { li: g.li, id: g.id, src: g.list, x0: g.x0, y0: g.y0, started: false, pid: g.pid, touch: true };
+  beginDrag(drag.s, g.x0, g.y0);
+}
+
+function swipeActions(g) {
+  const today = store.today;
+  const D = g.list.dataset.day || '';
+  const t = store.task(g.id);
+  // A daily routine is on every day, so "later" means skipping this one.
+  if (g.list.dataset.list === 'day' && D >= today && t?.repeat?.kind === 'daily') return { skip: D, label: D === today ? 'Skip today' : 'Skip', icon: I.skip };
+  if (g.list.dataset.list === 'day' && D >= today) {
+    const next = E.addDays(D, 1);
+    return { day: next, label: next === E.addDays(today, 1) ? 'Tomorrow' : E.fmtRelDay(next, today), icon: I.calendar };
+  }
+  return { day: today, label: 'Today', icon: I.sun };
+}
+
+function swipeStart(g) {
+  const li = g.li;
+  g.move = swipeActions(g);
+  const under = document.createElement('div');
+  under.className = 'swipe-under';
+  under.setAttribute('aria-hidden', 'true');
+  under.innerHTML = `<span class="su-done">${I.tick}<b>Done</b></span><span class="su-move"><b>${esc(g.move.label)}</b>${g.move.icon}</span>`;
+  under.style.cssText = `top:${li.offsetTop}px;left:${li.offsetLeft}px;width:${li.offsetWidth}px;height:${li.offsetHeight}px`;
+  li.parentElement.insertBefore(under, li);
+  li.classList.add('swiping');
+  g.under = under;
+  g.w = li.offsetWidth;
+  g.armed = false;
+  closeMenu();
+}
+
+function swipeMove(g, dx) {
+  const x = Math.max(-g.w * 0.92, Math.min(g.w * 0.92, dx));
+  g.x = x;
+  g.li.style.transform = `translateX(${x}px)`;
+  g.under.dataset.dir = x >= 0 ? 'done' : 'move';
+  const armed = Math.abs(x) > Math.min(110, g.w * 0.3);
+  if (armed !== g.armed) {
+    g.armed = armed;
+    g.under.classList.toggle('armed', armed);
+    if (armed) buzz(8);
+  }
+}
+
+function swipeEnd(g) {
+  ui.suppressClick = true;
+  setTimeout(() => (ui.suppressClick = false), 400);
+  if (!g.armed) return swipeBack(g);
+  const dir = g.x > 0 ? 1 : -1;
+  g.li.style.transition = 'transform 0.16s ease-in';
+  g.li.style.transform = `translateX(${dir * (g.w + 24)}px)`;
+  setTimeout(() => swipeDo(g, dir), 150);
+}
+
+function swipeBack(g) {
+  g.li.style.transition = 'transform 0.22s cubic-bezier(0.2, 0.8, 0.3, 1)';
+  g.li.style.transform = '';
+  setTimeout(() => {
+    g.li.classList.remove('swiping');
+    g.li.style.transition = '';
+    g.under?.remove();
+  }, 230);
+}
+
+function swipeDo(g, dir) {
+  const t = store.task(g.id);
+  const today = store.today;
+  if (!t) {
+    g.under?.remove();
+    return render();
+  }
+  if (dir > 0) {
+    const day = g.li.dataset.day || today;
+    store.complete(t.id, day);
+    buzz(14);
+    undoToast(doneMessage(t, day), lastStep());
+  } else if (g.move.skip) {
+    store.skip(t.id, g.move.skip);
+    undoToast(`Skipped “${t.title}”${g.move.skip === today ? ' today' : ''}`, lastStep());
+  } else {
+    store.moveTo(t.id, g.move.day);
+    undoToast(`Moved to ${relWord(g.move.day, today)}`, lastStep());
+  }
+}
+
+/* ---------- dragging (mouse anywhere on a row, or touch after a long press) ---------- */
+
+function beginDrag(d, x, y) {
+  const r = d.li.getBoundingClientRect();
+  d.dx = x - r.left;
+  d.dy = y - r.top;
+  d.ghost = d.li.cloneNode(true);
+  d.ghost.classList.add('drag-ghost');
+  if (d.touch) d.ghost.classList.add('lifted');
+  d.ghost.style.width = `${r.width}px`;
+  d.ghost.style.left = `${x - d.dx}px`;
+  d.ghost.style.top = `${y - d.dy}px`;
+  document.body.appendChild(d.ghost);
+  d.li.classList.add('drag-placeholder');
+  d.startIndex = [...d.src.children].indexOf(d.li);
+  d.scroller = d.li.closest('.col, .view-calendar, .view-history');
+  d.lx = x;
+  d.ly = y;
+  d.started = true;
+  closeMenu();
+  d.raf = requestAnimationFrame(() => dragLoop(d));
+}
+
+function dragAt(d, x, y) {
+  d.ghost.style.left = `${x - d.dx}px`;
+  d.ghost.style.top = `${y - d.dy}px`;
+  const el = document.elementFromPoint(x, y);
+  const list = el?.closest('[data-list="day"], [data-list="all"]') || null;
+  for (const n of $$('.drop-target')) if (n !== list) n.classList.remove('drop-target');
+  if (!list) return;
+  list.classList.add('drop-target');
+  const rows = [...list.querySelectorAll(':scope > li.task')].filter((r) => r !== d.li);
+  let before = null;
+  for (const r of rows) {
+    const b = r.getBoundingClientRect();
+    if (y < b.top + b.height / 2) {
+      before = r;
+      break;
+    }
+  }
+  if (before) {
+    if (d.li.nextSibling !== before) list.insertBefore(d.li, before);
+  } else if (list.lastElementChild !== d.li) list.appendChild(d.li);
+  d.over = list;
+}
+
+// Scroll the list while a dragged row is held near the top or bottom edge.
+function dragLoop(d) {
+  if (drag.s !== d || !d.started) return;
+  const col = d.scroller;
+  if (col) {
+    const b = col.getBoundingClientRect();
+    const top = b.top + 70;
+    const bottom = b.bottom - (isMobile() ? 230 : 140);
+    const v = d.ly < top ? -Math.min(16, (top - d.ly) / 5 + 3) : d.ly > bottom ? Math.min(16, (d.ly - bottom) / 5 + 3) : 0;
+    if (v) {
+      const was = col.scrollTop;
+      col.scrollTop += v;
+      if (col.scrollTop !== was) dragAt(d, d.lx, d.ly);
+    }
+  }
+  d.raf = requestAnimationFrame(() => dragLoop(d));
+}
+
 function onPointerMove(e) {
+  const g = touch.s;
+  if (g && e.pointerId === g.pid && g.mode !== 'drag') {
+    const dx = e.clientX - g.x0;
+    const dy = e.clientY - g.y0;
+    if (!g.mode) {
+      if (g.canSwipe && Math.abs(dx) > 12 && Math.abs(dx) > Math.abs(dy) * 1.3) {
+        g.mode = 'swipe';
+        clearTimeout(g.timer);
+        swipeStart(g);
+      } else if (Math.hypot(dx, dy) > 9) {
+        g.mode = 'scroll';
+        clearTimeout(g.timer);
+      }
+    }
+    if (g.mode === 'swipe') {
+      e.preventDefault();
+      swipeMove(g, dx);
+    }
+    return;
+  }
   const d = drag.s;
   if (!d || e.pointerId !== d.pid) return;
   if (!d.started) {
     if (Math.hypot(e.clientX - d.x0, e.clientY - d.y0) < 6) return;
-    const r = d.li.getBoundingClientRect();
-    d.dx = e.clientX - r.left;
-    d.dy = e.clientY - r.top;
-    d.ghost = d.li.cloneNode(true);
-    d.ghost.classList.add('drag-ghost');
-    d.ghost.style.width = `${r.width}px`;
-    document.body.appendChild(d.ghost);
-    d.li.classList.add('drag-placeholder');
-    d.started = true;
-    closeMenu();
+    beginDrag(d, e.clientX, e.clientY);
   }
   e.preventDefault();
-  d.ghost.style.left = `${e.clientX - d.dx}px`;
-  d.ghost.style.top = `${e.clientY - d.dy}px`;
-  const el = document.elementFromPoint(e.clientX, e.clientY);
-  const list = el?.closest('[data-list="day"], [data-list="all"]') || null;
-  for (const n of $$('.drop-target')) if (n !== list) n.classList.remove('drop-target');
-  if (list) {
-    list.classList.add('drop-target');
-    const rows = [...list.querySelectorAll(':scope > li.task')].filter((r) => r !== d.li);
-    let before = null;
-    for (const r of rows) {
-      const b = r.getBoundingClientRect();
-      if (e.clientY < b.top + b.height / 2) {
-        before = r;
-        break;
-      }
-    }
-    if (before) {
-      if (d.li.nextSibling !== before) list.insertBefore(d.li, before);
-    } else if (list.lastElementChild !== d.li) list.appendChild(d.li);
-    d.over = list;
+  d.lx = e.clientX;
+  d.ly = e.clientY;
+  dragAt(d, e.clientX, e.clientY);
+}
+
+function endDrag(d) {
+  cancelAnimationFrame(d.raf);
+  d.ghost?.remove();
+  d.li.classList.remove('drag-placeholder');
+  for (const n of $$('.drop-target')) n.classList.remove('drop-target');
+}
+
+function onPointerCancel(e) {
+  const g = touch.s;
+  if (g && e.pointerId === g.pid) {
+    touch.s = null;
+    clearTimeout(g.timer);
+    if (g.mode === 'swipe') swipeBack(g);
   }
-  const col = el?.closest('.col, .view-calendar');
-  if (col) {
-    const b = col.getBoundingClientRect();
-    if (e.clientY < b.top + 60) col.scrollTop -= 14;
-    else if (e.clientY > b.bottom - 140) col.scrollTop += 14;
+  const d = drag.s;
+  if (d && e.pointerId === d.pid) {
+    drag.s = null;
+    if (d.started) {
+      endDrag(d);
+      render();
+    }
   }
 }
 
 function onPointerUp(e) {
+  const g = touch.s;
+  if (g && e.pointerId === g.pid) {
+    touch.s = null;
+    clearTimeout(g.timer);
+    if (g.mode === 'swipe') return swipeEnd(g);
+    if (g.mode !== 'drag') return;
+  }
   const d = drag.s;
+  if (!d || e.pointerId !== d.pid) return;
   drag.s = null;
-  if (!d || !d.started) return;
+  if (!d.started) return;
   e.preventDefault();
-  d.ghost?.remove();
-  d.li.classList.remove('drag-placeholder');
-  for (const n of $$('.drop-target')) n.classList.remove('drop-target');
+  endDrag(d);
   ui.suppressClick = true;
-  setTimeout(() => (ui.suppressClick = false), 80);
+  setTimeout(() => (ui.suppressClick = false), d.touch ? 400 : 80);
   const list = d.li.closest('[data-list]');
   const t = store.task(d.id);
   if (!list || !t || list.dataset.list === 'none') return render();
+  if (list === d.src && [...list.children].indexOf(d.li) === d.startIndex) return render();
   const today = store.today;
   if (list.dataset.list === 'day') {
     const D = list.dataset.day;
@@ -1851,11 +2235,8 @@ function onClick(e) {
     }
     case 'settings':
       return openSettings(store.device.apiKey ? null : 'claude');
-    case 'undo': {
-      const l = store.undo();
-      if (l) toast(`Undid ${l.charAt(0).toLowerCase() + l.slice(1)}`, { label: 'Redo', run: () => store.redo() });
-      return;
-    }
+    case 'undo':
+      return undoLast();
     case 'check':
       return li && toggleCheck(li);
     case 'open':
@@ -1863,6 +2244,9 @@ function onClick(e) {
     case 'menu':
       if (menuAnchor === a) return;
       return id && openMenu(a, id, li?.dataset.day);
+    case 'tip-ok':
+      store.setDevice({ tipGestures: true });
+      return render();
     case 'start':
       if (!id) return;
       store.startTimer(id);
@@ -1992,10 +2376,10 @@ function onAI(act, el) {
     return renderAIPanel();
   }
   if (act === 'undo') {
-    revertStep(a.step);
+    const undid = revertStep(a.step);
     ui.ai = null;
     renderAIPanel();
-    return toast('Undid Claude’s changes');
+    return toast('Undid Claude’s changes. Your message is back in the box.', undid ? { label: 'Redo', run: () => revertStep(undid) } : null);
   }
   if (act === 'answer') return answerQuestion(Number(el.dataset.qi), el.dataset.v);
   if (act === 'skipq') {
@@ -2077,13 +2461,13 @@ function onKey(e) {
   }
   if (mod && e.key.toLowerCase() === 'z' && !typing) {
     e.preventDefault();
-    const l = e.shiftKey ? store.redo() : store.undo();
-    if (l) toast(`${e.shiftKey ? 'Redid' : 'Undid'} ${l.charAt(0).toLowerCase() + l.slice(1)}`);
+    if (e.shiftKey) redoLast();
+    else undoLast();
     return;
   }
   if (mod && e.key.toLowerCase() === 'y' && !typing) {
     e.preventDefault();
-    store.redo();
+    redoLast();
     return;
   }
   if (e.target.classList?.contains('body') && e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
@@ -2125,11 +2509,29 @@ function bindEvents() {
   document.addEventListener('pointerdown', onPointerDown);
   document.addEventListener('pointermove', onPointerMove, { passive: false });
   document.addEventListener('pointerup', onPointerUp);
-  document.addEventListener('pointercancel', onPointerUp);
+  document.addEventListener('pointercancel', onPointerCancel);
+  // While a row is being dragged or swiped, the page must not scroll under the finger.
+  document.addEventListener('touchmove', (e) => {
+    if (drag.s?.started || touch.s?.mode === 'swipe') e.preventDefault();
+  }, { passive: false });
+  // A long press on a row means "pick it up", not "open the browser's menu".
+  document.addEventListener('contextmenu', (e) => {
+    if (coarse() && e.target.closest('li.task')) e.preventDefault();
+  });
   document.addEventListener('pointerdown', (e) => {
     if (!$('#menu').hidden && !e.target.closest('#menu') && !e.target.closest('[data-act="menu"]')) closeMenu();
   });
-  $('#scrim').addEventListener('click', closeDrawer);
+  $('#scrim').addEventListener('click', () => {
+    closeMenu();
+    closeDrawer();
+  });
+  sheetDrag($('#drawer'), '.sheet-grip, .dr-head', closeDrawer);
+  sheetDrag($('#menu'), '.sheet-grip', closeMenu);
+  watchViewport();
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    ui.installPrompt = e;
+  });
   window.addEventListener('resize', () => closeMenu());
   for (const c of $$('.col')) c.addEventListener('scroll', () => closeMenu(), { passive: true });
 
@@ -2145,6 +2547,8 @@ function bindEvents() {
       else addFromInput();
     }
   });
+  // Tapping + keeps the keyboard up, so you can add several tasks in a row.
+  $('#addBtn').addEventListener('mousedown', (e) => e.preventDefault());
   $('#composer').addEventListener('submit', (e) => {
     e.preventDefault();
     addFromInput();
@@ -2247,6 +2651,7 @@ function boot() {
   applyTheme();
   staticChrome();
   bindEvents();
+  store.onStep = (kind, step) => (kind === 'undo' ? stepUndone(step) : stepRedone(step));
   store.subscribe((reason) => {
     if (reason === 'device') {
       renderTop();
