@@ -1,5 +1,5 @@
 // Daywell service worker: works offline, always prefers the freshest version when online.
-const CACHE = 'daywell-v1';
+const CACHE = 'daywell-v2';
 const ASSETS = [
   './',
   'index.html',
@@ -55,7 +55,8 @@ function withTimeout(promise, ms) {
 async function networkFirst(req) {
   const cache = await caches.open(CACHE);
   try {
-    const res = await withTimeout(fetch(req), 4500);
+    // no-cache: always revalidate with the server so new versions show up right away.
+    const res = await withTimeout(fetch(req.url, { cache: 'no-cache', credentials: 'same-origin' }), 4500);
     if (res.ok) cache.put(req, res.clone());
     return res;
   } catch {

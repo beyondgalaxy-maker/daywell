@@ -217,10 +217,11 @@ export function normalizeTask(input, today) {
     start: isKey(input.start) ? input.start : today,
     plan: isKey(input.plan) ? input.plan : null,
     spent: Math.max(0, Math.round(Number(input.spent) || 0)),
+    bumps: Math.max(0, Math.round(Number(input.bumps) || 0)),
     doneAt: input.doneAt || null,
     doneDay: isKey(input.doneDay) ? input.doneDay : null,
     paused: !!input.paused,
-    ai: input.ai && input.ai.note ? { note: String(input.ai.note).slice(0, 240), day: input.ai.day || today } : null,
+    ai: input.ai && (input.ai.note || input.ai.focus) ? { note: String(input.ai.note || '').slice(0, 240), day: input.ai.day || today, focus: !!input.ai.focus } : null,
     src: input.src === 'ai' ? 'ai' : 'manual',
     createdAt: Number(input.createdAt) || now,
     updatedAt: Number(input.updatedAt) || now,
@@ -431,8 +432,26 @@ export function scoreTask(t, { today, idx, weekStart = 1 }) {
       why.push(`Due ${fmtRelDay(t.deadline, today, { long: true })}`);
     } else s += Math.max(0, 20 - (d - 7));
   }
+  // Lead time: a long task due soon needs to start earlier than a short one.
+  const est0 = estMid(t);
+  if (t.deadline && est0) {
+    const left = diffDays(today, t.deadline);
+    if (left >= 0 && left <= 14) {
+      const lead = Math.min(50, est0 / Math.max(1, left) / 6);
+      s += lead;
+      if (lead >= 12 && !why.some((w) => w.startsWith('Due') || w.startsWith('Overdue'))) why.push(`Needs ~${fmtMins(est0)} before ${fmtRelDay(t.deadline, today, { long: true })}`);
+    }
+  }
+  if (t.bumps) {
+    s += Math.min(40, t.bumps * 10);
+    if (t.bumps >= 2) why.push(`Pushed back ${t.bumps} times`);
+  }
   if (!t.repeat) {
-    if (t.date && t.date < today) s += 12 + Math.min(30, diffDays(t.date, today) * 3);
+    if (t.date && t.date < today) {
+      const carried = diffDays(t.date, today);
+      s += 12 + Math.min(30, carried * 3);
+      if (carried >= 2) why.push(`Carried over ${carried} days`);
+    }
     if (!t.deadline) {
       const age = Math.max(0, diffDays(keyFromMs(t.createdAt), today));
       s += Math.min(35, age * 1.2);
@@ -554,6 +573,35 @@ export function freeTime({ events = [], D, dayStart = '07:00', dayEnd = '23:00',
   }
   if (cur < end) gaps.push([cur, end]);
   return { start, end, from, busy: merged, gaps, free: gaps.reduce((s, [a, b]) => s + b - a, 0) };
+}
+
+// Free time and planned work for each of the next `days` days (today counts from now).
+export function weekCapacity(state, idx, today, settings, eventsOn, now = new Date(), days = 7) {
+  const out = [];
+  for (let i = 0; i < days; i++) {
+    const D = addDays(today, i);
+    const evs = eventsOn ? eventsOn(D).filter((e) => !e.allDay) : [];
+    const ft = freeTime({ events: evs, D, dayStart: settings.dayStart, dayEnd: settings.dayEnd, now: i === 0 ? now : null });
+    const items = dayItems(state, idx, D, today, settings).filter((x) => x.status === 'open' && !x.dueOnly);
+    const load = workload(items);
+    out.push({
+      date: D,
+      weekday: WEEKDAYS[weekday(D)],
+      freeMinutes: ft.free,
+      busyMinutes: ft.busy.reduce((a, [x, y]) => a + (y - x), 0),
+      plannedMinutes: load.mins,
+      unestimatedTasks: load.unknown,
+      deadlines: state.tasks.filter((t) => !t.deletedAt && !t.purged && !t.doneDay && t.deadline === D).map((t) => t.title),
+    });
+  }
+  return out;
+}
+
+// Average real minutes from timed completions of this task.
+export function typicalMinutes(idx, id) {
+  const mins = (idx.byTask.get(id) || []).filter((e) => !e.skip && e.mins).map((e) => e.mins);
+  if (mins.length < 2) return null;
+  return Math.round(mins.reduce((a, b) => a + b, 0) / mins.length);
 }
 
 /* ------------------------------------------------------------------ */

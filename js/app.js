@@ -191,7 +191,9 @@ function subline(it, ctx, place) {
     }
     return bits.join('');
   }
-  if (t.ai && t.ai.day === today && place === 'day' && it.status === 'open' && it.day === today) {
+  const aiToday = t.ai && t.ai.day === it.day && place === 'day' && it.status === 'open';
+  if (aiToday && t.ai.focus) bits.push('<span class="focus-tag">Focus</span>');
+  if (aiToday && t.ai.note) {
     bits.push(`<span class="ai-note">${I.spark}${esc(t.ai.note)}</span>`);
   } else if (it.carried && it.status === 'open') {
     bits.push(`<span>From ${esc(relWord(it.carried, today))}</span>`);
@@ -359,6 +361,8 @@ function briefHtml(ctx) {
   const deferred = (plan.deferred || []).map((p) => ({ t: title(p.id), to: p.to })).filter((x) => x.t);
   if (pulled.length) moves.push(`Added ${pulled.map(esc).join(', ')}.`);
   if (deferred.length) moves.push(`Moved ${deferred.map((x) => `${esc(x.t)} to ${x.to ? esc(relWord(x.to, today)) : 'no date'}`).join(', ')}.`);
+  const sched = (plan.scheduled || []).map((p) => ({ t: title(p.id), d: p.date })).filter((x) => x.t);
+  if (sched.length) moves.push(`Scheduled ${sched.map((x) => `${esc(x.t)} for ${esc(relWord(x.d, today))}`).join(', ')}.`);
   const added = new Set(plan.added || []);
   const sug = (plan.suggest || []).map((s, i) => ({ ...s, i })).filter((s) => !added.has(s.i));
   const step = ui.planStep && ui.planStep.day === today ? ui.planStep.step : null;
@@ -738,7 +742,7 @@ function renderDrawer() {
   const gcal = google.configured
     ? `<div class="field"><span class="label">Calendar</span><div><div class="row"><input class="inp" type="date" id="gcDate" value="${t.date && t.date >= today ? t.date : today}"><input class="inp" type="time" id="gcTime" value="${t.time || nextHalfHour()}"><button type="button" class="chip-btn" data-dr="gcal">${I.calendar}Block ${E.fmtMins(E.estMid(t) || 30)}</button></div><p class="dr-hint">Adds a busy block to your Google Calendar.</p></div></div>`
     : '';
-  $('#drawer').innerHTML = `<div class="dr-head"><span class="grow">${t.src === 'ai' ? 'Added by Claude' : 'Added'} ${esc(relWord(E.keyFromMs(t.createdAt || Date.now()), today))}</span><button type="button" class="icon-btn sm" data-dr="close" aria-label="Close details">${I.x}</button></div>
+  $('#drawer').innerHTML = `<div class="dr-head"><span class="grow">${t.src === 'ai' ? 'Added by Claude' : 'Added'} ${esc(relWord(E.keyFromMs(t.createdAt || Date.now()), today))}${t.bumps ? `, pushed back ${t.bumps} time${t.bumps === 1 ? '' : 's'}` : ''}</span><button type="button" class="icon-btn sm" data-dr="close" aria-label="Close details">${I.x}</button></div>
 <div class="dr-body">
 <textarea class="dr-title" data-f="title" rows="1" aria-label="Title">${esc(t.title)}</textarea>
 <div class="dr-done"><button type="button" class="chip-btn${doneToday ? ' on' : ''}" data-dr="toggle-done">${I.tick}${doneToday ? (rep ? 'Done today' : 'Done') : rep ? 'Mark done today' : 'Mark done'}</button>
@@ -998,7 +1002,7 @@ async function askClaude(textArg) {
   const slowTimer = setTimeout(renderAIPanel, 15000);
   const ctx = ctxNow();
   try {
-    const { ids, snapshot } = AI.commandContext({ state: store.state, idx: ctx.idx, today: ctx.today, now: new Date(), events: google.configured ? google.windowEvents(14) : null, settings: ctx.settings });
+    const { ids, snapshot } = AI.commandContext({ state: store.state, idx: ctx.idx, today: ctx.today, now: new Date(), events: google.configured ? google.windowEvents(14) : null, eventsOn: (D) => google.eventsOn(D), settings: ctx.settings });
     const r = await AI.callClaude({
       apiKey: store.device.apiKey,
       model: store.device.model || AI.DEFAULT_MODEL,
@@ -1137,8 +1141,7 @@ async function planDay({ auto = false } = {}) {
     const ctx = ctxNow();
     const items = E.dayItems(ctx.s, ctx.idx, today, today, ctx.settings);
     const now = new Date();
-    const free = E.freeTime({ events: google.eventsOn(today).filter((e) => !e.allDay), D: today, dayStart: ctx.settings.dayStart, dayEnd: ctx.settings.dayEnd, now }).free;
-    const { ids, snapshot } = AI.planContext({ state: ctx.s, idx: ctx.idx, today, now, events: google.configured ? google.windowEvents(14) : null, settings: ctx.settings, todayItems: items, free });
+    const { ids, snapshot } = AI.planContext({ state: ctx.s, idx: ctx.idx, today, now, events: google.configured ? google.windowEvents(14) : null, eventsOn: (D) => google.eventsOn(D), settings: ctx.settings, todayItems: items });
     const r = await AI.callClaude({
       apiKey: store.device.apiKey,
       model: store.device.model || AI.DEFAULT_MODEL,
@@ -1160,6 +1163,13 @@ async function planDay({ auto = false } = {}) {
 function applyPlan(data, ids, today) {
   const before = store.undoStack.length;
   store.transact('your day plan', (s) => {
+    // A new plan replaces today's earlier focus marks and notes.
+    for (const t of s.tasks) {
+      if (t.ai && t.ai.day === today) {
+        t.ai = null;
+        t.updatedAt = Date.now();
+      }
+    }
     const find = (sid) => {
       const id = ids.long(sid);
       return id ? s.tasks.find((t) => t.id === id && !t.deletedAt && !t.purged) : null;
@@ -1180,10 +1190,28 @@ function applyPlan(data, ids, today) {
       moveTask(s, t, to, today);
       deferred.push({ id: t.id, to, reason: d.reason });
     }
+    const scheduled = [];
+    for (const sc of (data.schedule || []).slice(0, 6)) {
+      const t = find(sc.id);
+      const limit = E.addDays(today, 7);
+      if (!t || t.doneDay || !E.isKey(sc.date) || sc.date <= today || sc.date > limit) continue;
+      if (t.repeat && !['interval', 'weekflex'].includes(t.repeat.kind)) continue;
+      if (pulled.some((p) => p.id === t.id)) continue;
+      moveTask(s, t, sc.date, today);
+      t.ai = { note: String(sc.reason || '').slice(0, 120), day: sc.date };
+      scheduled.push({ id: t.id, date: sc.date, reason: sc.reason });
+    }
     for (const n of data.notes || []) {
       const t = find(n.id);
       if (!t || !n.note) continue;
-      t.ai = { note: String(n.note).slice(0, 120), day: today };
+      t.ai = { ...(t.ai || {}), note: String(n.note).slice(0, 120), day: today };
+      t.updatedAt = Date.now();
+    }
+    const focus = [...new Set((data.focus || []).map((x) => ids.long(x)).filter(Boolean))].slice(0, 3);
+    for (const id of focus) {
+      const t = s.tasks.find((x) => x.id === id);
+      if (!t) continue;
+      t.ai = { note: t.ai?.day === today ? t.ai.note : '', day: today, focus: true };
       t.updatedAt = Date.now();
     }
     for (const e of data.estimates || []) {
@@ -1199,6 +1227,8 @@ function applyPlan(data, ids, today) {
       by: 'claude',
       pulled,
       deferred,
+      scheduled,
+      focus,
       suggest: (data.suggest || []).slice(0, 3).map((x) => ({ title: String(x.title || '').slice(0, 140), reason: String(x.reason || '').slice(0, 140), deadline: E.isKey(x.deadline) ? x.deadline : null, estMin: x.estMin ?? null, estMax: x.estMax ?? null })),
       rank: [...new Set((data.rank || []).map((x) => ids.long(x)).filter(Boolean))],
       added: [],

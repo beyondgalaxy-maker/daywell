@@ -333,7 +333,10 @@ export function markDone(s, t, day, mins = null) {
   if (!t.repeat) {
     t.doneAt = now;
     t.doneDay = day;
-  } else t.plan = null;
+  } else {
+    t.plan = null;
+    t.bumps = 0;
+  }
   t.spent = 0;
   t.updatedAt = now;
   if (s.meta.timer?.id === t.id) s.meta.timer = { id: null, updatedAt: now };
@@ -356,11 +359,13 @@ export function markUndone(s, t, day) {
 
 export function moveTask(s, t, day, today) {
   const now = Date.now();
+  // Count real postpones: something due now (or carried) pushed to later or to no date.
+  const current = t.repeat ? t.plan || null : t.date;
+  if (today && current && current <= today && (!day || day > today) && !t.doneDay) t.bumps = (t.bumps || 0) + 1;
   if (!t.repeat) {
     t.date = day;
   } else {
     t.plan = day;
-    // Moving a skipped or finished occurrence back to a day: clear the plan if it's already done there.
   }
   if (t.doneDay && day) {
     t.doneDay = null;
@@ -372,7 +377,6 @@ export function moveTask(s, t, day, today) {
     const o = s.meta.order[day];
     if (!o.ids.includes(t.id)) s.meta.order[day] = { ...o, ids: [...o.ids, t.id], at: now };
   }
-  void today;
 }
 
 /* ---------- diffs ---------- */
