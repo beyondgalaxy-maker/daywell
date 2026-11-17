@@ -39,7 +39,7 @@ Settings → Claude → paste your Anthropic API key. Defaults: model `claude-so
 
 Daywell talks to a small Google Apps Script that runs in your own Google account. It reads your calendars and stores a compressed copy of your tasks so all your devices stay in sync.
 
-1. Settings → Google Calendar and sync → **Copy script** (it contains a private key).
+1. Settings → Google Calendar and sync → **Copy script**. It holds no keys: the first Daywell that connects registers its own private key with it.
 2. Go to [script.google.com](https://script.google.com/home/projects/create), replace the sample code, and Save.
 3. **Deploy → New deployment → Web app**. Set *Execute as: Me* and *Who has access: Anyone*, then Deploy.
 4. Allow access. If Google says the app isn't verified, choose *Advanced → Go to … (unsafe)*. It's your own script.

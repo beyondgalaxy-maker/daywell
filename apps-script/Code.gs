@@ -1,12 +1,12 @@
 // Daywell connector for Google Calendar and sync.
-// Runs inside YOUR Google account. Daywell's Settings fills in SECRET for you
-// when you press "Copy script"; only someone with this secret can use the script.
+// Runs inside YOUR Google account and contains no keys. The first Daywell that presses
+// Connect registers a private key here; after that, only that key works.
+// To connect a different Daywell later, choose resetKey in the toolbar and press Run once.
 //
 // Setup: script.google.com → New project → paste this → Save →
 // Deploy → New deployment → Web app → Execute as: Me, Who has access: Anyone → Deploy.
 
-const SECRET = '__DAYWELL_SECRET__';
-const VERSION = 1;
+const VERSION = 2;
 const CHUNK = 8000;
 
 function doGet(e) {
@@ -32,7 +32,11 @@ function respond_(p) {
 }
 
 function handle_(p) {
-  if (!p || p.secret !== SECRET) return { ok: false, error: 'This script has a different key. Copy the script again from Daywell Settings.' };
+  p = p || {};
+  if (p.action === 'claim') return claim_(p.secret);
+  var stored = PropertiesService.getScriptProperties().getProperty('dw_key');
+  if (!stored) return { ok: false, error: 'This script is not connected yet. Press Connect in Daywell.' };
+  if (p.secret !== stored) return { ok: false, error: 'This script belongs to a different Daywell key. In the script editor, run resetKey, then press Connect in Daywell again.' };
   switch (p.action) {
     case 'ping':
       return { ok: true, version: VERSION, timeZone: Session.getScriptTimeZone() };
@@ -140,4 +144,25 @@ function addEvent_(p) {
   var cal = CalendarApp.getDefaultCalendar();
   var ev = cal.createEvent(String(p.title || 'Daywell task'), new Date(p.start), new Date(p.end), { description: String(p.description || 'Added from Daywell') });
   return { ok: true, id: ev.getId() };
+}
+
+function claim_(secret) {
+  secret = String(secret || '');
+  if (secret.length < 20) return { ok: false, error: 'Missing key.' };
+  var lock = LockService.getScriptLock();
+  lock.waitLock(10000);
+  try {
+    var props = PropertiesService.getScriptProperties();
+    var stored = props.getProperty('dw_key');
+    if (stored && stored !== secret) return { ok: false, error: 'This script is already connected to another Daywell. In the script editor, run resetKey, then press Connect again.' };
+    if (!stored) props.setProperty('dw_key', secret);
+    return { ok: true, version: VERSION, timeZone: Session.getScriptTimeZone() };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Run this once from the editor to let a new Daywell connect (your synced data is kept).
+function resetKey() {
+  PropertiesService.getScriptProperties().deleteProperty('dw_key');
 }

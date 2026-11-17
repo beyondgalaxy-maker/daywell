@@ -10,11 +10,10 @@ export function newSecret() {
   return [...a].map((b) => b.toString(36).padStart(2, '0')).join('').slice(0, 28);
 }
 
-export async function scriptWithSecret(secret) {
+export async function scriptText() {
   const res = await fetch(SCRIPT_PATH, { cache: 'no-cache' });
-  if (!res.ok) throw new Error('Could not load the script template.');
-  const text = await res.text();
-  return text.replace('__DAYWELL_SECRET__', secret);
+  if (!res.ok) throw new Error('Could not load the script.');
+  return res.text();
 }
 
 export function validScriptUrl(u) {
@@ -86,6 +85,10 @@ export class Google {
 
   ping() {
     return this.request('ping');
+  }
+  // First connection registers this device's key with the script (later devices use a setup link).
+  claim() {
+    return this.request('claim');
   }
   async loadCalendars() {
     const r = await this.request('calendars');

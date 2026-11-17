@@ -2,7 +2,7 @@
 import * as E from './engine.js';
 import * as AI from './ai.js';
 import { Store, applyChanges, markDone, moveTask, repairState } from './store.js';
-import { Google, newSecret, scriptWithSecret, validScriptUrl } from './google.js';
+import { Google, newSecret, scriptText, validScriptUrl } from './google.js';
 import { I } from './icons.js';
 
 const store = new Store();
@@ -1260,7 +1260,6 @@ function renderSettings() {
   const sh = store.state.shared;
   const hours = (sel) => Array.from({ length: 24 }, (_, h) => `<option value="${h}"${h === sel ? ' selected' : ''}>${E.fmtTime(E.minToTime(h * 60))}</option>`).join('');
   const g = google;
-  const pending = dv.gsSecretPending || '';
   const cals = g.calendars || [];
   const prefs = sh.calendars || {};
   const googleBody = g.configured
@@ -1272,13 +1271,13 @@ function renderSettings() {
 <div class="st-row"><label></label><div class="row"><button type="button" class="btn secondary" data-st="disconnect">Disconnect Google</button></div></div>`
     : `<p>See your Google Calendar events on each day, let Claude plan around them, and sync tasks between your phone and laptop. It runs as a small free script inside your own Google account. Setup takes about 3 minutes.</p>
 <ol class="steps">
-<li><button type="button" class="chip-btn" data-st="copy-script">${I.copy}Copy script</button> It has a private key built in.</li>
+<li><button type="button" class="chip-btn" data-st="copy-script">${I.copy}Copy script</button></li>
 <li>Open <a href="https://script.google.com/home/projects/create" target="_blank" rel="noopener">script.google.com</a>, delete the sample code, paste, and press <b>Save</b>.</li>
 <li>Click <b>Deploy</b>, then <b>New deployment</b>. Pick <b>Web app</b>, set <b>Execute as: Me</b> and <b>Who has access: Anyone</b>, and press <b>Deploy</b>.</li>
 <li>Allow access. If Google says the app isn't verified, choose <b>Advanced</b>, then <b>Go to … (unsafe)</b>. It's your own script.</li>
 <li>Copy the <b>Web app URL</b> (it ends in /exec) and paste it here.</li></ol>
 <div class="st-row"><label for="st-gsurl">Web app URL</label><div class="row"><input id="st-gsurl" class="inp wide" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(dv.gsUrlDraft || '')}"></div></div>
-<div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect" ${pending ? '' : 'disabled title="Copy the script first"'}>Connect</button><span id="st-gstatus" class="st-status"></span></div></div>
+<div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect">Connect</button><span id="st-gstatus" class="st-status"></span></div></div>
 <p class="st-note">Already connected on another device? Open its setup link here instead.</p>`;
   $('#settings').innerHTML = `<div class="st-head"><h2>Settings</h2><button type="button" class="icon-btn" data-st="close" aria-label="Close settings">${I.x}</button></div><div class="st-body">
 <section class="st-sec" id="st-claude"><h3>Claude <span class="badge${dv.apiKey ? '' : ' off'}">${dv.apiKey ? 'Key saved' : 'Not set up'}</span></h3>
@@ -1341,16 +1340,13 @@ async function onSettings(act, el) {
     return renderSettings();
   }
   if (act === 'copy-script') {
-    const secret = dv.gsSecretPending || newSecret();
-    store.setDevice({ gsSecretPending: secret });
     try {
-      const code = await scriptWithSecret(secret);
-      await copyText(code);
+      await copyText(await scriptText());
       toast('Script copied. Paste it into a new Apps Script project.');
     } catch (e) {
       toast(e.message);
     }
-    return renderSettings();
+    return;
   }
   if (act === 'connect') {
     const url = $('#st-gsurl').value.trim();
@@ -1363,11 +1359,11 @@ async function onSettings(act, el) {
     }
     out.className = 'st-status';
     out.textContent = 'Connecting…';
-    store.setDevice({ gsUrl: url, gsSecret: dv.gsSecretPending });
+    store.setDevice({ gsUrl: url, gsSecret: newSecret() });
     try {
-      await google.ping();
+      await google.claim();
       await google.loadCalendars().catch(() => {});
-      store.setDevice({ gsSecretPending: '', gsUrlDraft: '' });
+      store.setDevice({ gsUrlDraft: '' });
       out.className = 'st-status ok';
       out.textContent = 'Connected.';
       await google.sync();
