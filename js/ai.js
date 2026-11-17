@@ -317,6 +317,7 @@ export class IdMap {
 function eventLine(ev, today) {
   const o = { title: ev.title };
   if (ev.calName) o.calendar = ev.calName;
+  if (ev.optional) o.optional = true;
   if (ev.allDay) {
     o.allDay = true;
     o.date = ev.startDay;

@@ -22,11 +22,40 @@ export function validScriptUrl(u) {
 
 function normEvent(ev) {
   const o = { ...ev, title: String(ev.title || '(No title)') };
+  // Events on a calendar named "optional" are shown but don't block free time.
+  if (/optional/i.test(o.calName || '')) {
+    o.optional = true;
+    o.free = true;
+  }
+  if (!o.allDay) {
+    if (!o.start || !o.end || isNaN(Date.parse(o.start)) || isNaN(Date.parse(o.end))) return null;
+    const mins = (Date.parse(o.end) - Date.parse(o.start)) / 60000;
+    if (mins >= 23.5 * 60) {
+      // Birthdays and similar come through as midnight-to-midnight: treat them as all-day.
+      o.allDay = true;
+      o.startDay = E.keyFromDate(new Date(o.start));
+      o.endDay = E.keyFromDate(new Date(Date.parse(o.end) - 60000));
+      o.endDay = E.addDays(o.endDay, 1);
+      delete o.start;
+      delete o.end;
+    } else if (mins <= 0) o.free = true;
+  }
   if (o.allDay) {
     if (!E.isKey(o.startDay)) return null;
     if (!E.isKey(o.endDay) || o.endDay <= o.startDay) o.endDay = E.addDays(o.startDay, 1);
-  } else if (!o.start || !o.end || isNaN(Date.parse(o.start)) || isNaN(Date.parse(o.end))) return null;
+  }
   return o;
+}
+
+// The same event on two calendars (e.g. a busy-mirror calendar) shows once; mirrors lose.
+function dedupe(list) {
+  const seen = new Map();
+  const rank = (ev) => (/availab|busy|mirror/i.test(ev.calName || '') ? 1 : 0);
+  for (const ev of [...list].sort((a, b) => rank(a) - rank(b))) {
+    const k = `${ev.title.trim().toLowerCase()}|${ev.start || ev.startDay}|${ev.end || ev.endDay}`;
+    if (!seen.has(k)) seen.set(k, ev);
+  }
+  return [...seen.values()];
 }
 
 export class Google {
@@ -159,16 +188,16 @@ export class Google {
   }
   eventsOn(D) {
     if (!this.configured && !this.events.size) return [];
-    const out = [];
+    let out = [];
     for (const ev of this.events.values()) if (this.overlaps(ev, D, E.addDays(D, 1))) out.push(ev);
+    out = dedupe(out);
     out.sort((a, b) => (a.allDay === b.allDay ? (a.start || a.startDay).localeCompare(b.start || b.startDay) : a.allDay ? -1 : 1));
     return out;
   }
   windowEvents(days = 14) {
     const today = this.store.today;
     const end = E.addDays(today, days);
-    return [...this.events.values()]
-      .filter((ev) => this.overlaps(ev, today, end))
+    return dedupe([...this.events.values()].filter((ev) => this.overlaps(ev, today, end)))
       .sort((a, b) => (a.start || a.startDay + 'T00').localeCompare(b.start || b.startDay + 'T00'));
   }
   clear() {
