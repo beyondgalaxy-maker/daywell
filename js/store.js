@@ -6,6 +6,7 @@ const DEVICE_KEY = 'daywell:device:v1';
 const EVENTS_KEY = 'daywell:events:v1';
 
 export const DEFAULT_SHARED = {
+  name: '',
   dayStart: '07:00',
   dayEnd: '23:00',
   rollHour: 4,

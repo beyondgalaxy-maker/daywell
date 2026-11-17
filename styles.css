@@ -391,87 +391,194 @@ main {
   background: var(--spruce-soft);
 }
 
-/* ---------- the day ribbon ---------- */
-.ribbon {
-  margin: 20px 0 4px;
+/* ---------- encouragement: progress ring ---------- */
+@property --ring {
+  syntax: '<number>';
+  inherits: true;
+  initial-value: 0;
 }
-.rb-track {
-  position: relative;
-  height: 12px;
-  border-radius: 7px;
-  background: linear-gradient(90deg, var(--dawn) 0%, var(--noon) 38%, var(--noon) 62%, var(--dusk) 100%);
-  overflow: hidden;
-}
-.rb-past {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--ink) 10%, transparent) 0 2px, transparent 2px 5px);
-  border-right: 0;
-}
-.rb-ev {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: color-mix(in srgb, var(--ink) 55%, transparent);
-  border-radius: 3px;
-}
-.rb-now {
-  position: absolute;
-  top: -5px;
-  width: 3px;
-  height: 22px;
-  margin-left: -1.5px;
-  border-radius: 2px;
-  background: var(--amber);
-  box-shadow: 0 0 0 2px var(--paper);
-}
-.rb-wrap {
-  position: relative;
-}
-.rb-load {
-  position: relative;
-  height: 5px;
-  margin-top: 6px;
-}
-.rb-load span {
-  position: absolute;
-  top: 0;
-  height: 5px;
-  border-radius: 3px;
-  background: var(--spruce);
-}
-.rb-load span.over {
-  background: var(--p1);
-}
-.rb-axis {
+.cheer {
   display: flex;
-  justify-content: space-between;
-  margin-top: 6px;
-  font-size: 11.5px;
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
+  align-items: center;
+  gap: 16px;
+  margin: 20px 0 2px;
 }
-.rb-sum {
+.ring {
+  --ring: var(--to);
+  position: relative;
+  width: 58px;
+  height: 58px;
+  flex-shrink: 0;
+  animation: ringfill 0.7s cubic-bezier(0.3, 0.7, 0.2, 1);
+}
+@keyframes ringfill {
+  from {
+    --ring: var(--from);
+  }
+  to {
+    --ring: var(--to);
+  }
+}
+.ring svg {
+  width: 58px;
+  height: 58px;
+  transform: rotate(-90deg);
+  stroke-width: 5;
+}
+.r-track {
+  fill: none;
+  stroke: color-mix(in srgb, var(--spruce) 14%, var(--line-2));
+}
+.r-fill {
+  fill: none;
+  stroke: var(--spruce);
+  stroke-linecap: round;
+  stroke-dasharray: calc(var(--ring) * 1px) 200px;
+}
+.ring[style*='--to:0.0'] .r-fill {
+  stroke-linecap: butt;
+}
+.r-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 720;
+  font-size: 17px;
+  font-variation-settings: 'wdth' 80;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+.r-label small {
+  font-size: 12px;
+  font-weight: 560;
+  color: var(--muted);
+}
+.ring.complete .r-fill {
+  stroke: var(--spruce);
+}
+.ring.complete .r-label {
+  color: var(--spruce);
+}
+.ring.complete .r-label svg {
+  width: 24px;
+  height: 24px;
+  stroke-width: 2.8;
+  transform: none;
+}
+.ring.complete {
+  animation: ringfill 0.7s cubic-bezier(0.3, 0.7, 0.2, 1), ringpop 0.5s 0.55s ease-out;
+}
+@keyframes ringpop {
+  50% {
+    scale: 1.08;
+  }
+}
+.cheer-line {
+  font-size: 17px;
+  line-height: 1.4;
+  font-weight: 560;
+  max-width: 46ch;
+  text-wrap: pretty;
+}
+.cheer-sub {
   display: flex;
   flex-wrap: wrap;
-  gap: 2px 14px;
-  margin-top: 8px;
+  gap: 2px 16px;
+  margin-top: 4px;
   font-size: 13.5px;
-  color: var(--ink-2);
+  color: var(--spruce);
+  font-weight: 520;
 }
-.rb-sum b {
-  font-weight: 620;
-  color: var(--ink);
+
+/* celebration burst on check-off */
+.burst {
+  position: fixed;
+  z-index: 90;
+  pointer-events: none;
 }
-.rb-sum .over {
-  color: var(--p1);
-  font-weight: 560;
+.burst i {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  left: -3px;
+  top: -3px;
+  border-radius: 50%;
+  animation: burst 0.7s cubic-bezier(0.15, 0.8, 0.3, 1) forwards;
 }
+@keyframes burst {
+  to {
+    transform: translate(var(--dx), var(--dy)) scale(0.3);
+    opacity: 0;
+  }
+}
+.task.just-done .check {
+  animation: checkpop 0.32s ease-out;
+}
+@keyframes checkpop {
+  45% {
+    scale: 1.25;
+  }
+}
+
+/* the one thing to do next */
+.task.up-next {
+  background: color-mix(in srgb, var(--spruce) 7%, transparent);
+}
+@media (hover: hover) {
+  .task.up-next:hover {
+    background: color-mix(in srgb, var(--spruce) 10%, transparent);
+  }
+}
+.next-tag.bonus {
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+.task.up-next .title {
+  font-weight: 600;
+}
+.next-tag {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--spruce);
+  padding: 0 6px;
+  border-radius: 5px;
+  background: var(--spruce-soft);
+}
+.start-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 11px 4px 9px;
+  border-radius: 999px;
+  background: var(--spruce);
+  color: var(--paper);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+.start-btn svg {
+  width: 12px;
+  height: 12px;
+}
+.start-btn:hover {
+  background: var(--spruce-2);
+}
+.events {
+  margin-top: 14px;
+}
+.ev.opt {
+  opacity: 0.7;
+}
+.tasks.soft .title {
+  color: var(--muted);
+}
+
 .events {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 8px;
-  margin-top: 12px;
 }
 .ev {
   display: inline-flex;
@@ -642,8 +749,13 @@ main {
   padding: 7px 4px 7px 0;
   border-radius: 11px;
 }
-.task:hover {
-  background: var(--hover);
+@media (hover: hover) {
+  .task:hover {
+    background: var(--hover);
+  }
+  .check:hover {
+    color: var(--faint);
+  }
 }
 .grip {
   display: grid;
@@ -680,9 +792,6 @@ main {
   width: 15px;
   height: 15px;
   stroke-width: 2.6;
-}
-.check:hover {
-  color: var(--faint);
 }
 .task.p1 .check {
   border-color: var(--p1);
@@ -797,7 +906,7 @@ main {
   font-weight: 560;
 }
 .m-due.over {
-  color: var(--p1);
+  color: var(--p2);
   font-weight: 600;
 }
 .m-pri {
@@ -1581,7 +1690,7 @@ main {
   background: var(--spruce);
 }
 .trail i.miss {
-  background: color-mix(in srgb, var(--p1) 22%, var(--line-2));
+  background: color-mix(in srgb, var(--ink) 14%, var(--line-2));
 }
 .trail i.skip {
   background: repeating-linear-gradient(135deg, var(--line) 0 2px, transparent 2px 4px);
@@ -1854,7 +1963,7 @@ main {
   font-weight: 600;
 }
 .cell .cstat .m {
-  color: color-mix(in srgb, var(--p1) 70%, var(--muted));
+  color: var(--faint);
 }
 .cal-day h2 {
   font-size: 22px;
