@@ -405,7 +405,17 @@ function renderAll(ctx) {
   const one = shown.filter((t) => !t.repeat && !t.doneDay && !inToday.has(t.id));
   const scoreOf = (t) => E.scoreTask(t, ctx.sc).score;
   const upcoming = one.filter((t) => t.date && t.date > today).sort((a, b) => a.date.localeCompare(b.date) || scoreOf(b) - scoreOf(a));
-  const anytime = one.filter((t) => !t.date).sort((a, b) => scoreOf(b) - scoreOf(a));
+  // Claude's daily ranking orders the backlog; anything new or urgent since then is slotted in by score.
+  const plan = ctx.s.meta.plans[today];
+  const rank = plan && !plan.removed && plan.rank?.length ? new Map(plan.rank.map((id, i) => [id, i])) : null;
+  const byScore = (a, b) => scoreOf(b) - scoreOf(a);
+  let anytime = one.filter((t) => !t.date);
+  if (rank) {
+    const ranked = anytime.filter((t) => rank.has(t.id)).sort((a, b) => rank.get(a.id) - rank.get(b.id));
+    const rest = anytime.filter((t) => !rank.has(t.id)).sort(byScore);
+    const urgent = rest.filter((t) => t.priority === 1 || (t.deadline && E.diffDays(today, t.deadline) <= 1));
+    anytime = [...urgent, ...ranked, ...rest.filter((t) => !urgent.includes(t))];
+  } else anytime.sort(byScore);
   const reps = shown.filter((t) => t.repeat).sort((a, b) => a.title.localeCompare(b.title));
   const ws = E.startOfWeek(today, ctx.ws);
   const flex = reps.filter((t) => t.repeat.kind === 'weekflex' && !t.paused && !inToday.has(t.id) && !E.entriesBetween(ctx.idx, t.id, ws, E.addDays(ws, 6)).length);
@@ -425,7 +435,7 @@ function renderAll(ctx) {
     }
   }
   if (flex.length) html += `<h3 class="list-head">Once this week <span class="n">${flex.length}</span></h3><ul class="tasks" data-list="none">${flex.map((t) => row(t)).join('')}</ul>`;
-  html += `<h3 class="list-head">Anytime <span class="n">${anytime.length || ''}</span></h3><ul class="tasks" data-list="all" data-day="">${anytime.map((t) => row(t)).join('')}${!anytime.length ? `<li class="empty-drop">${q || ui.area ? 'No matching tasks.' : 'Tasks without a date land here. Claude and the “Worth doing today” list will bring them back when it matters.'}</li>` : ''}</ul>`;
+  html += `<h3 class="list-head">Anytime <span class="n">${anytime.length || ''}</span>${rank && anytime.length > 1 ? `<span class="n" style="margin-left:auto;display:inline-flex;align-items:center;gap:4px;color:var(--spruce)" title="Claude ranked these by importance this morning">${I.spark.replace('<svg', '<svg style="width:12px;height:12px"')}Ranked by Claude</span>` : ''}</h3><ul class="tasks" data-list="all" data-day="">${anytime.map((t) => row(t)).join('')}${!anytime.length ? `<li class="empty-drop">${q || ui.area ? 'No matching tasks.' : 'Tasks without a date land here. Claude and the “Worth doing today” list will bring them back when it matters.'}</li>` : ''}</ul>`;
   if (reps.length) {
     const open_ = !store.device.collapsed.routines;
     html += `<h3 class="list-head"><button type="button" class="toggle" data-act="toggle-routines" aria-expanded="${open_}">${I.down}Repeating</button><span class="n">${reps.length}</span></h3>`;
@@ -1190,6 +1200,7 @@ function applyPlan(data, ids, today) {
       pulled,
       deferred,
       suggest: (data.suggest || []).slice(0, 3).map((x) => ({ title: String(x.title || '').slice(0, 140), reason: String(x.reason || '').slice(0, 140), deadline: E.isKey(x.deadline) ? x.deadline : null, estMin: x.estMin ?? null, estMax: x.estMax ?? null })),
+      rank: [...new Set((data.rank || []).map((x) => ids.long(x)).filter(Boolean))],
       added: [],
     };
   });
@@ -1223,7 +1234,7 @@ function maybeAutoPlan() {
   if (E.keyFromDate(now) === today && now.getHours() < (s.shared.autoPlanHour ?? 6)) return;
   const endMin = E.timeToMin(s.shared.dayEnd || '23:00');
   const nowMin = E.minutesInto(now, today);
-  if (endMin > E.timeToMin(s.shared.dayStart || '07:00') && nowMin > endMin - 60) return;
+  if (endMin > E.timeToMin(s.shared.dayStart || '07:00') && nowMin > endMin - 180) return; // too little day left
   if (!s.tasks.some((t) => !t.deletedAt && !t.purged)) return;
   ui.autoPlanTried = today;
   planDay({ auto: true });
@@ -2092,6 +2103,7 @@ function bindEvents() {
   settings.addEventListener('close', () => {
     saveKeyField();
     render();
+    maybeAutoPlan();
   });
   settings.addEventListener('click', (e) => {
     if (e.target === settings) settings.close();

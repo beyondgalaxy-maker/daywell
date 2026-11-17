@@ -96,10 +96,11 @@ const idReason = (extra = {}) => ({
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['brief', 'order', 'pull', 'defer', 'notes', 'estimates', 'suggest'],
+  required: ['brief', 'order', 'rank', 'pull', 'defer', 'notes', 'estimates', 'suggest'],
   properties: {
     brief: { type: 'string' },
     order: { type: 'array', items: { type: 'string' } },
+    rank: { type: 'array', items: { type: 'string' } },
     pull: { type: 'array', items: idReason({ reason: { type: 'string' } }) },
     defer: { type: 'array', items: idReason({ to: nStr, reason: { type: 'string' } }) },
     notes: { type: 'array', items: idReason({ note: { type: 'string' } }) },
@@ -176,6 +177,7 @@ Goals
 - Push what matters: deadlines in the next few days, priority 1–2, repeating tasks that are overdue (every-N-days tasks past due, weekly tasks carried over), and tasks that have waited a long time.
 
 order: every id to do today, in the order to do them, including ones you pull in. Put deep, demanding work (like long study blocks) early when energy is high unless events say otherwise. Group quick tasks. Place tasks with a set time sensibly around events. Optional tasks go last.
+rank: the ids in "other" from most to least important overall (include as many as you can, at least the top 15), weighing deadlines, priority, how long they've waited, overdue repeats, and what seems to matter to the person. This re-sorts their backlog each day.
 pull: tasks from "other" to add to today, each with a short reason ("Due Wednesday", "Last done 3 weeks ago"). Only pull what fits.
 defer: when today is over capacity, move lower-value one-off tasks out: to = a sensible later date (often tomorrow) or null for no date. Never defer repeating tasks, priority 1, or anything due today or overdue. Defer optional and priority-4 tasks first.
 notes: up to 6 very short hints (about 8 words max) where they help, like "Due Thu — draft the outline now" or "Before your 2 PM class". Skip obvious ones.

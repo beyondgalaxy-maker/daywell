@@ -24,7 +24,7 @@ It's a static site with no server and no account. Tasks live in your browser. Op
 
   Paste several lines and Enter adds one task per line.
 - **Ctrl/⌘ + Enter** (or the **Ask** button) sends what you typed to Claude. It splits brain dumps into tasks, estimates times for clear ones ("cut nails" is 10 minutes), asks quick tap-to-answer questions about unclear ones, and can edit, complete, or delete tasks when you ask ("move laundry to Saturday", "I finished piano"). You can also ask questions ("I have 30 minutes, what should I do?"). Every change is one Undo.
-- **Plan my day** (automatic each morning if you like) has Claude reorder today, pull in what matters (deadlines, high priority, things you've neglected), move low-value items off an overloaded day, and write a short brief. It never changes your priorities or deadlines.
+- **Plan my day** (automatic each morning if you like) has Claude reorder today, pull in what matters (deadlines, high priority, things you've neglected), move low-value items off an overloaded day, re-rank your Anytime list by importance, and write a short brief. It never changes your priorities or deadlines.
 - **Worth doing today** suggests tasks that are due soon, waiting a long time, or overdue repeats, even without Claude.
 - Drag tasks to reorder Today or pull them in from Everything else. Alt + ↑/↓ reorders with the keyboard.
 - The bar under the date is your day: events, what's already passed, and how your task time fits into the free time left.
