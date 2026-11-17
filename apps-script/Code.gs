@@ -1,12 +1,14 @@
 // Daywell connector for Google Calendar and sync.
 // Runs inside YOUR Google account and contains no keys. The first Daywell that presses
 // Connect registers a private key here; after that, only that key works.
+// Your other devices sign in with the sign-in key you choose in Daywell's Settings. Only a salted
+// hash of it is stored here, and wrong guesses are limited.
 // To connect a different Daywell later, choose resetKey in the toolbar and press Run once.
 //
 // Setup: script.google.com → New project → paste this → Save →
 // Deploy → New deployment → Web app → Execute as: Me, Who has access: Anyone → Deploy.
 
-const VERSION = 2;
+const VERSION = 3;
 const CHUNK = 8000;
 
 function doGet(e) {
@@ -34,6 +36,7 @@ function respond_(p) {
 function handle_(p) {
   p = p || {};
   if (p.action === 'claim') return claim_(p.secret);
+  if (p.action === 'login') return login_(p.phrase);
   var stored = PropertiesService.getScriptProperties().getProperty('dw_key');
   if (!stored) return { ok: false, error: 'This script is not connected yet. Press Connect in Daywell.' };
   if (p.secret !== stored) return { ok: false, error: 'This script belongs to a different Daywell key. In the script editor, run resetKey, then press Connect in Daywell again.' };
@@ -50,6 +53,10 @@ function handle_(p) {
       return save_(p.data, p.baseRev);
     case 'addEvent':
       return addEvent_(p);
+    case 'setPhrase':
+      return setPhrase_(p);
+    case 'phrase':
+      return phraseInfo_();
     default:
       return { ok: false, error: 'Unknown action' };
   }
@@ -160,6 +167,56 @@ function claim_(secret) {
   } finally {
     lock.releaseLock();
   }
+}
+
+// ---------- signing in on another device with your sign-in key ----------
+
+function norm_(s) {
+  return String(s || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function hash_(salt, phrase) {
+  var bytes = Utilities.computeHmacSha256Signature(phrase, salt, Utilities.Charset.UTF_8);
+  return Utilities.base64Encode(bytes);
+}
+
+function setPhrase_(p) {
+  var props = PropertiesService.getScriptProperties();
+  var phrase = norm_(p.phrase);
+  if (!phrase) {
+    props.deleteProperty('dw_phrase');
+    props.deleteProperty('dw_claude');
+    return { ok: true, set: false };
+  }
+  if (phrase.length < 4) return { ok: false, error: 'Use at least 4 characters.' };
+  var salt = Utilities.getUuid();
+  props.setProperties({ dw_salt: salt, dw_phrase: hash_(salt, phrase) });
+  if (p.claudeKey) props.setProperty('dw_claude', String(p.claudeKey));
+  else props.deleteProperty('dw_claude');
+  return { ok: true, set: true, claude: !!p.claudeKey };
+}
+
+function phraseInfo_() {
+  var props = PropertiesService.getScriptProperties();
+  return { ok: true, set: !!props.getProperty('dw_phrase'), claude: !!props.getProperty('dw_claude') };
+}
+
+function login_(phrase) {
+  var props = PropertiesService.getScriptProperties();
+  var want = props.getProperty('dw_phrase');
+  if (!want || !props.getProperty('dw_key')) return { ok: false, error: 'No sign-in key yet. On your computer, open Daywell → Settings → Sign-in key.' };
+  var cache = CacheService.getScriptCache();
+  var fast = Number(cache.get('dw_fails') || 0);
+  var slow = Number(cache.get('dw_fails_day') || 0);
+  if (fast >= 8 || slow >= 30) return { ok: false, error: 'Too many wrong tries. Wait a while, then try again.' };
+  if (hash_(props.getProperty('dw_salt') || '', norm_(phrase)) !== want) {
+    cache.put('dw_fails', String(fast + 1), 900);
+    cache.put('dw_fails_day', String(slow + 1), 21600);
+    Utilities.sleep(500);
+    return { ok: false, error: 'That key didn’t work. Check it and try again.' };
+  }
+  cache.remove('dw_fails');
+  return { ok: true, secret: props.getProperty('dw_key'), claudeKey: props.getProperty('dw_claude') || null, version: VERSION };
 }
 
 // Run this once from the editor to let a new Daywell connect (your synced data is kept).
