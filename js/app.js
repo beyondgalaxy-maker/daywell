@@ -247,6 +247,47 @@ function render() {
   if (ui.drawer && !ui.fromDrawer && !$('#drawer').contains(document.activeElement)) renderDrawer();
 }
 
+/* ---------- birthdays ---------- */
+
+// The day before someone's birthday on your calendar, a to-do pops up to wish them a happy
+// birthday (top of the list). It stays through the day itself and tidies itself away after.
+// Ids are stable, so two devices never add it twice, and one you delete stays deleted.
+function ensureBirthdays() {
+  if (!google.configured) return;
+  const today = store.today;
+  const want = new Map();
+  for (const D of [today, E.addDays(today, 1)]) {
+    for (const ev of google.eventsOn(D)) {
+      if (!ev.allDay || ev.startDay !== D || /holiday/i.test(ev.calName || '')) continue;
+      const who = E.birthdayName(ev.title);
+      if (!who) continue;
+      const id = `bday-${who.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'someone'}-${D}`;
+      want.set(id, { id, who, D });
+    }
+  }
+  const have = new Set(store.state.tasks.map((t) => t.id));
+  const add = [...want.values()].filter((w) => !have.has(w.id));
+  const stale = store.state.tasks.filter((t) => t.auto?.kind === 'birthday' && !t.deletedAt && !t.purged && !t.doneDay && t.auto.day < today);
+  if (!add.length && !stale.length) return;
+  store.transact(
+    'Birthday reminders',
+    (s) => {
+      for (const w of add) {
+        const before = E.addDays(w.D, -1);
+        s.tasks.push(E.normalizeTask({ id: w.id, title: `Wish ${w.who} a happy birthday`, date: before < today ? today : before, deadline: w.D, priority: 1, estMin: 5, estMax: 10, area: 'Social', auto: { kind: 'birthday', day: w.D, who: w.who } }, today));
+      }
+      for (const t of stale) {
+        const x = s.tasks.find((y) => y.id === t.id);
+        if (x) {
+          x.deletedAt = Date.now();
+          x.updatedAt = Date.now();
+        }
+      }
+    },
+    { undoable: false },
+  );
+}
+
 /* ---------- sign in on a new device with your key ---------- */
 
 const needsSignIn = () => !google.configured && !store.device.localOnly;
@@ -353,7 +394,7 @@ function subline(it, ctx, place) {
   if (aiToday && t.ai.focus) bits.push('<span class="focus-tag">Focus</span>');
   if (aiToday && t.ai.note) {
     bits.push(`<span class="ai-note">${I.spark}${esc(t.ai.note)}</span>`);
-  } else if (it.carried && it.status === 'open') {
+  } else if (it.carried && it.status === 'open' && t.auto?.kind !== 'birthday') {
     bits.push(`<span>From ${esc(relWord(it.carried, today))}</span>`);
   } else if (it.lateDays && it.status === 'open') {
     const last = E.lastDoneDay(ctx.idx, t.id);
@@ -375,14 +416,18 @@ function metaBits(it, ctx, place) {
   if (t.time && place !== 'routines') out.push(`<span class="m-time">${E.fmtTime(t.time)}</span>`);
   const est = E.fmtEst(t.estMin, t.estMax);
   if (est) out.push(`<span class="m-est">${est}</span>`);
-  if (t.deadline && it.status !== 'done' && !t.doneDay) {
+  const bday = t.auto?.kind === 'birthday';
+  if (bday && it.status !== 'done' && !t.doneDay) {
+    const d = E.diffDays(ctx.today, t.auto.day);
+    out.push(`<span class="m-bday">${I.cake}${d <= 0 ? 'Birthday today' : d === 1 ? 'Birthday tomorrow' : `Birthday ${E.fmtRelDay(t.auto.day, ctx.today)}`}</span>`);
+  } else if (t.deadline && it.status !== 'done' && !t.doneDay) {
     const d = E.diffDays(ctx.today, t.deadline);
     const cls = d < 0 ? 'over' : d <= 2 ? 'soon' : '';
     out.push(`<span class="m-due ${cls}">${d < 0 ? `Was due ${E.fmtRelDay(t.deadline, ctx.today)}` : `Due ${E.fmtRelDay(t.deadline, ctx.today)}`}</span>`);
   }
   if (place === 'later' && t.date) out.push(`<span class="m-date">${E.fmtRelDay(t.date, ctx.today)}</span>`);
   if (t.repeat && place !== 'routines' && place !== 'daily') out.push(`<span class="m-rep" title="${esc(E.describeRepeat(t.repeat))}">${I.repeat}</span>`);
-  if (t.priority <= 2) out.push(`<span class="m-pri p${t.priority}" title="${E.PRIORITY_NAMES[t.priority]} priority">P${t.priority}</span>`);
+  if (t.priority <= 2 && !bday) out.push(`<span class="m-pri p${t.priority}" title="${E.PRIORITY_NAMES[t.priority]} priority">P${t.priority}</span>`);
   if (t.area && place !== 'day' && place !== 'daily') out.push(`<span class="m-area">${esc(t.area)}</span>`);
   return out.join('');
 }
@@ -392,7 +437,7 @@ function taskRow(it, ctx, place = 'day', opts = {}) {
   const st = it.status;
   const done = st === 'done';
   const timing = ctx.timer?.id === t.id;
-  const cls = ['task', `p${t.priority}`, done && 'done', st === 'skip' && 'skipped', st === 'miss' && 'missed', t.optional && 'optional', timing && 'timing', opts.next && 'up-next'].filter(Boolean).join(' ');
+  const cls = ['task', `p${t.priority}`, done && 'done', st === 'skip' && 'skipped', st === 'miss' && 'missed', t.optional && 'optional', timing && 'timing', opts.next && 'up-next', t.auto?.kind === 'birthday' && !done && 'bday'].filter(Boolean).join(' ');
   const tag = opts.next ? `<span class="next-tag${opts.bonus ? ' bonus' : ''}">${opts.bonus ? 'Bonus' : 'Up next'}</span>` : '';
   const sub = tag + subline(it, ctx, place);
   const start = opts.next && !timing ? `<button type="button" class="start-btn" data-act="start" aria-label="Start a timer for “${esc(t.title)}”">${I.play}<span>Start</span></button>` : '';
@@ -2915,6 +2960,7 @@ function boot() {
       renderTop();
       return;
     }
+    if (reason === 'events') ensureBirthdays();
     render();
     if ((reason === 'change' || reason === 'external') && google.configured && store.device.sync) {
       clearTimeout(ui.syncTimer);
@@ -2931,6 +2977,7 @@ function boot() {
   setInterval(() => {
     const t = store.today;
     if (t !== ui.lastToday) {
+      ensureBirthdays();
       ui.planError = null;
       if (ui.day === ui.lastToday) ui.day = null;
     }

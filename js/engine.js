@@ -147,6 +147,25 @@ export function normRepeat(r) {
   return null;
 }
 
+// "Mom's birthday", "Sam Lee's bday", "Birthday: Ana", "Happy birthday Joe!" → the person's name.
+// Parties and dinners aren't birthdays to wish anyone for.
+export function birthdayName(title) {
+  const t = String(title || '').replace(/\s+/g, ' ').trim();
+  if (!/\b(birthday|bday|b-day)\b/i.test(t)) return null;
+  const tidy = (s) => {
+    const n = String(s || '')
+      .replace(/[\s!.,:;~*\-–—]+$/u, '')
+      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+      .trim();
+    return n && n.length <= 60 && !/^(party|dinner|lunch|brunch|drinks|celebration|cake|gift|present|card)\b/i.test(n) ? n : null;
+  };
+  let m = t.match(/^(.+?)['’]s?\s+(?:\d+\w{0,2}\s+)?(?:birthday|bday|b-day)\b/i);
+  if (m) return tidy(m[1].replace(/['’]$/, ''));
+  m = t.match(/^(?:happy\s+)?(?:birthday|bday|b-day)\s*(?:[:\-–—]\s*|\s(?:for|of|to)\s+|\s+)(.+)$/i);
+  if (m) return tidy(m[1]);
+  return null;
+}
+
 // The day's backbone: routines that come back every day (or every weekday).
 export function isDaily(t) {
   const r = t?.repeat;
@@ -229,6 +248,7 @@ export function normalizeTask(input, today) {
     doneDay: isKey(input.doneDay) ? input.doneDay : null,
     paused: !!input.paused,
     ai: input.ai && (input.ai.note || input.ai.focus) ? { note: String(input.ai.note || '').slice(0, 240), day: input.ai.day || today, focus: !!input.ai.focus } : null,
+    auto: input.auto && input.auto.kind === 'birthday' && isKey(input.auto.day) ? { kind: 'birthday', day: input.auto.day, who: String(input.auto.who || '').slice(0, 80) } : null,
     src: input.src === 'ai' ? 'ai' : 'manual',
     createdAt: Number(input.createdAt) || now,
     updatedAt: Number(input.updatedAt) || now,

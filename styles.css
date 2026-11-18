@@ -2399,6 +2399,35 @@ dialog::backdrop {
   letter-spacing: 0.01em;
 }
 
+/* ---------- birthday wishes ---------- */
+.task.bday,
+.task.bday.up-next {
+  background: color-mix(in srgb, var(--amber) 13%, transparent);
+}
+.task.bday .title {
+  font-weight: 650;
+}
+.task.bday .check {
+  border-color: var(--amber);
+  background: color-mix(in srgb, var(--amber) 14%, transparent);
+}
+.m-bday {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--amber) 78%, var(--ink));
+}
+.m-bday svg {
+  width: 15px;
+  height: 15px;
+}
+@media (hover: hover) {
+  .task.bday:hover {
+    background: color-mix(in srgb, var(--amber) 18%, transparent);
+  }
+}
+
 /* ---------- smart send ---------- */
 .add-btn.ai {
   background: var(--spruce);
