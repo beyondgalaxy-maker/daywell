@@ -451,11 +451,14 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const row = (i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus });
   const dailyRow = (i) => taskRow(i, ctx, 'daily', { next: i === nextItem, bonus });
   const empty = (msg) => `<li class="empty-drop">${msg}</li>`;
-  if (prog.split && !isPast) {
-    // Daily routines are the day's list (and what the ring counts). Other to-dos get a short
-    // section of their own, showing just the top few, because nobody does everything in one day.
-    const daily = open.filter((i) => E.isDaily(i.t));
-    const todos = open.filter((i) => !E.isDaily(i.t));
+  const daily = open.filter((i) => E.isDaily(i.t));
+  const todos = open.filter((i) => !E.isDaily(i.t));
+  const split = store.device.todayView === 'split';
+  if (prog.split && todos.length && !isPast) {
+    html += `<div class="list-bar"><div class="seg sm" role="group" aria-label="Show the list">${['together', 'split'].map((v) => `<button type="button" data-act="today-view" data-v="${v}" aria-pressed="${(v === 'split') === split}">${v === 'split' ? 'Dailies first' : 'All in order'}</button>`).join('')}</div></div>`;
+  }
+  if (split && prog.split && !isPast) {
+    // Split look: daily routines, then a short to-do section (top few, the rest folded).
     const dailyDone = items.some((i) => E.isDaily(i.t) && i.status === 'done');
     const dailyLeft = daily.filter((i) => !i.t.optional).length;
     html += `<h3 class="list-head">Daily${dailyLeft ? ` <span class="n">${dailyLeft} left</span>` : ''}</h3>`;
@@ -473,9 +476,10 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
       if (rest.length || ui.todosAll) html += `<button type="button" class="more-btn" data-act="todos-all">${ui.todosAll ? 'Show fewer' : `Show ${rest.length} more`}</button>`;
     }
   } else {
+    // Together: everything in the suggested order. Dailies keep their repeat mark so you can tell them apart.
     html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${open.map(row).join('')}${!open.length && !showWelcome ? empty(isPast ? 'Nothing else was planned for this day.' : isToday ? (prog.doneN ? 'Everything on today’s list is done. Pick something from Worth doing today if you feel like more.' : 'Nothing planned yet. Add a task below, or drag one in from Everything else.') : 'Nothing planned yet. Drag tasks here to plan them for this day.') : ''}</ul>`;
   }
-  if (isToday && (!prog.split || open.filter((i) => !E.isDaily(i.t)).length < 3)) html += suggestionsHtml(ctx, items);
+  if (isToday && todos.length < 3) html += suggestionsHtml(ctx, items);
   if (missed.length) html += `<h3 class="list-head">Not done <span class="n">${missed.length}</span></h3><ul class="tasks soft" data-list="none">${missed.map((i) => taskRow(i, ctx, 'past')).join('')}</ul>`;
   if (finished.length) {
     const open_ = ui.showDone || !isToday;
@@ -550,9 +554,10 @@ function cheerHtml(ctx, D, prog, isToday) {
     }
   }
   const from = ui.lastProgress && ui.lastProgress.day === D && ui.lastProgress.total === total ? (ui.lastProgress.doneN / Math.max(1, total)) * 100 : pct * 100;
-  const ring = `<div class="ring${complete ? ' complete' : ''}" role="img" aria-label="${doneN} of ${total} done" style="--from:${from.toFixed(1)};--to:${(pct * 100).toFixed(1)}">
+  const what = prog.split ? 'dailies' : 'things';
+  const ring = `<div class="ring${complete ? ' complete' : ''}" role="img" aria-label="${complete ? `All ${what} done` : `${left} ${what} to go`}" style="--from:${from.toFixed(1)};--to:${(pct * 100).toFixed(1)}">
 <svg viewBox="0 0 48 48" aria-hidden="true"><circle class="r-track" cx="24" cy="24" r="20"/><circle class="r-fill" cx="24" cy="24" r="20" pathLength="100"/></svg>
-<span class="r-label">${complete ? I.tick : `${doneN}<small>/${total}</small>`}</span></div>`;
+<span class="r-label${complete ? '' : ' togo'}">${complete ? I.tick : `${left}<small>to go</small>`}</span></div>`;
   return `<section class="cheer">${total ? ring : ''}<div class="cheer-text"><p class="cheer-line">${esc(line)}</p>${subs.length ? `<p class="cheer-sub">${subs.map((x) => `<span>${x}</span>`).join('')}</p>` : ''}</div></section>`;
 }
 
@@ -1236,7 +1241,8 @@ ${rep && inToday ? `<button type="button" class="mi" role="menuitem" data-m="ski
 <button type="button" class="mi danger" role="menuitem" data-m="delete">${I.trash}Delete</button>`;
   m.hidden = false;
   if (isMobile()) $('#scrim').hidden = false;
-  ui.menuFor = { id, day, anchor };
+  const col = anchor.closest('.col, .view-calendar');
+  ui.menuFor = { id, day, anchor, col, top: col?.scrollTop ?? 0 };
   anchor.setAttribute('aria-expanded', 'true');
   if (!isMobile()) {
     const r = anchor.getBoundingClientRect();
@@ -2145,7 +2151,7 @@ function swipeActions(g) {
   const t = store.task(g.id);
   // A daily routine is on every day, so "later" means skipping this one.
   if (g.list.dataset.list === 'day' && D >= today && t?.repeat?.kind === 'daily') return { skip: D, label: D === today ? 'Skip today' : 'Skip', icon: I.skip };
-  if (g.list.classList.contains('todo-list') && D === today && !t?.deadline && !(t?.repeat && !['interval', 'weekflex'].includes(t.repeat.kind))) return { day: null, label: 'Not today', icon: I.x };
+  if (g.list.dataset.list === 'day' && D === today && t && !t.repeat && !t.deadline) return { day: null, label: 'Not today', icon: I.x };
   if (g.list.dataset.list === 'day' && D >= today) {
     const next = E.addDays(D, 1);
     return { day: next, label: next === E.addDays(today, 1) ? 'Tomorrow' : E.fmtRelDay(next, today), icon: I.calendar };
@@ -2467,6 +2473,9 @@ function onClick(e) {
     case 'gate-skip':
       store.setDevice({ localOnly: true });
       return render();
+    case 'today-view':
+      store.setDevice({ todayView: a.dataset.v });
+      return render();
     case 'todos-all':
       ui.todosAll = !ui.todosAll;
       return render();
@@ -2772,7 +2781,13 @@ function bindEvents() {
     ui.installPrompt = e;
   });
   window.addEventListener('resize', () => closeMenu());
-  for (const c of $$('.col')) c.addEventListener('scroll', () => closeMenu(), { passive: true });
+  // Scrolling away closes the menu; a small nudge (or a scroll the app makes itself) doesn't.
+  for (const c of $$('.col')) {
+    c.addEventListener('scroll', () => {
+      const m = ui.menuFor;
+      if (m && (m.col !== c || Math.abs(c.scrollTop - m.top) > 48)) closeMenu();
+    }, { passive: true });
+  }
 
   const input = $('#input');
   input.addEventListener('input', () => {
