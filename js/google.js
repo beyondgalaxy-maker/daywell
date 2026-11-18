@@ -159,6 +159,7 @@ export class Google {
   async loadCalendars() {
     const r = await this.request('calendars');
     this.calendars = r.calendars || [];
+    this._on = null;
     this.emit();
     return this.calendars;
   }
@@ -223,10 +224,19 @@ export class Google {
     const keep = [...this.events.values()].filter((ev) => this.overlaps(ev, E.addDays(today, -7), E.addDays(today, 30)));
     this.store.saveEventsCache({ events: keep, at: Date.now() });
   }
+  // Only calendars that are switched on, even for events cached before a calendar was turned off.
+  shown(ev) {
+    if (!this.calendars || !ev.cal) return true;
+    if (!this._on || this._onKey !== JSON.stringify(this.store.state.shared.calendars || {})) {
+      this._onKey = JSON.stringify(this.store.state.shared.calendars || {});
+      this._on = new Set(this.enabledCalendarIds());
+    }
+    return this._on.has(ev.cal);
+  }
   eventsOn(D) {
     if (!this.configured && !this.events.size) return [];
     let out = [];
-    for (const ev of this.events.values()) if (this.overlaps(ev, D, E.addDays(D, 1))) out.push(ev);
+    for (const ev of this.events.values()) if (this.overlaps(ev, D, E.addDays(D, 1)) && this.shown(ev)) out.push(ev);
     out = dedupe(out);
     out.sort((a, b) => (a.allDay === b.allDay ? (a.start || a.startDay).localeCompare(b.start || b.startDay) : a.allDay ? -1 : 1));
     return out;
@@ -234,7 +244,7 @@ export class Google {
   windowEvents(days = 14) {
     const today = this.store.today;
     const end = E.addDays(today, days);
-    return dedupe([...this.events.values()].filter((ev) => this.overlaps(ev, today, end)))
+    return dedupe([...this.events.values()].filter((ev) => this.overlaps(ev, today, end) && this.shown(ev)))
       .sort((a, b) => (a.start || a.startDay + 'T00').localeCompare(b.start || b.startDay + 'T00'));
   }
   clear() {

@@ -147,6 +147,13 @@ export function normRepeat(r) {
   return null;
 }
 
+// The day's backbone: routines that come back every day (or every weekday).
+export function isDaily(t) {
+  const r = t?.repeat;
+  if (!r) return false;
+  return r.kind === 'daily' || (r.kind === 'weekly' && (r.days || []).length >= 5);
+}
+
 const mondayFirst = (a, b) => ((a + 6) % 7) - ((b + 6) % 7);
 export function describeRepeat(r, { long = false } = {}) {
   if (!r) return '';

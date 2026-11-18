@@ -49,6 +49,7 @@ const ui = {
   syncTimer: null,
   menuFor: null,
   restored: null,
+  fresh: new Map(), // task id → when you moved it onto a day (keeps it in view)
 };
 
 /* ================================================================== */
@@ -348,7 +349,7 @@ function subline(it, ctx, place) {
     }
     return bits.join('');
   }
-  const aiToday = t.ai && t.ai.day === it.day && place === 'day' && it.status === 'open';
+  const aiToday = t.ai && t.ai.day === it.day && (place === 'day' || place === 'daily') && it.status === 'open';
   if (aiToday && t.ai.focus) bits.push('<span class="focus-tag">Focus</span>');
   if (aiToday && t.ai.note) {
     bits.push(`<span class="ai-note">${I.spark}${esc(t.ai.note)}</span>`);
@@ -380,9 +381,9 @@ function metaBits(it, ctx, place) {
     out.push(`<span class="m-due ${cls}">${d < 0 ? `Was due ${E.fmtRelDay(t.deadline, ctx.today)}` : `Due ${E.fmtRelDay(t.deadline, ctx.today)}`}</span>`);
   }
   if (place === 'later' && t.date) out.push(`<span class="m-date">${E.fmtRelDay(t.date, ctx.today)}</span>`);
-  if (t.repeat && place !== 'routines') out.push(`<span class="m-rep" title="${esc(E.describeRepeat(t.repeat))}">${I.repeat}</span>`);
+  if (t.repeat && place !== 'routines' && place !== 'daily') out.push(`<span class="m-rep" title="${esc(E.describeRepeat(t.repeat))}">${I.repeat}</span>`);
   if (t.priority <= 2) out.push(`<span class="m-pri p${t.priority}" title="${E.PRIORITY_NAMES[t.priority]} priority">P${t.priority}</span>`);
-  if (t.area && place !== 'day') out.push(`<span class="m-area">${esc(t.area)}</span>`);
+  if (t.area && place !== 'day' && place !== 'daily') out.push(`<span class="m-area">${esc(t.area)}</span>`);
   return out.join('');
 }
 
@@ -447,8 +448,34 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const bonus = !!nextItem?.t.optional;
   // A one-time hint so the phone gestures are discoverable.
   if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe right when done, left for later. Hold to move.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
-  html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${open.map((i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus })).join('')}${!open.length && !showWelcome ? `<li class="empty-drop">${isPast ? 'Nothing else was planned for this day.' : isToday ? (prog.doneN ? 'Everything on today’s list is done. Pick something from Worth doing today if you feel like more.' : 'Nothing planned yet. Add a task below, or drag one in from Everything else.') : 'Nothing planned yet. Drag tasks here to plan them for this day.'}</li>` : ''}</ul>`;
-  if (isToday) html += suggestionsHtml(ctx, items);
+  const row = (i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus });
+  const dailyRow = (i) => taskRow(i, ctx, 'daily', { next: i === nextItem, bonus });
+  const empty = (msg) => `<li class="empty-drop">${msg}</li>`;
+  if (prog.split && !isPast) {
+    // Daily routines are the day's list (and what the ring counts). Other to-dos get a short
+    // section of their own, showing just the top few, because nobody does everything in one day.
+    const daily = open.filter((i) => E.isDaily(i.t));
+    const todos = open.filter((i) => !E.isDaily(i.t));
+    const dailyDone = items.some((i) => E.isDaily(i.t) && i.status === 'done');
+    const dailyLeft = daily.filter((i) => !i.t.optional).length;
+    html += `<h3 class="list-head">Daily${dailyLeft ? ` <span class="n">${dailyLeft} left</span>` : ''}</h3>`;
+    html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${daily.map(dailyRow).join('')}${!daily.length ? empty(dailyDone ? 'All your dailies are done. Nice work.' : 'No daily routines on this day.') : ''}</ul>`;
+    if (todos.length) {
+      const LIMIT = 3;
+      const showAll = ui.todosAll || todos.length <= LIMIT + 1;
+      // Anything you just added or moved here stays in view, even when the list is folded.
+      const now = Date.now();
+      const fresh = (i) => now - (i.t.createdAt || 0) < 600000 || now - (ui.fresh.get(i.id) || 0) < 600000;
+      const shown = showAll ? todos : todos.filter((i, k) => k < LIMIT || fresh(i));
+      const rest = todos.filter((i) => !shown.includes(i)).map((i) => i.id);
+      html += `<h3 class="list-head">${isToday ? 'To-dos' : 'Also'} <span class="n">${todos.length}</span>${isToday ? '<span class="lh-note">pick what fits</span>' : ''}</h3>`;
+      html += `<ul class="tasks day-list todo-list" data-list="day" data-day="${D}" data-rest="${rest.join(',')}">${shown.map(row).join('')}</ul>`;
+      if (rest.length || ui.todosAll) html += `<button type="button" class="more-btn" data-act="todos-all">${ui.todosAll ? 'Show fewer' : `Show ${rest.length} more`}</button>`;
+    }
+  } else {
+    html += `<ul class="tasks day-list" data-list="day" data-day="${D}">${open.map(row).join('')}${!open.length && !showWelcome ? empty(isPast ? 'Nothing else was planned for this day.' : isToday ? (prog.doneN ? 'Everything on today’s list is done. Pick something from Worth doing today if you feel like more.' : 'Nothing planned yet. Add a task below, or drag one in from Everything else.') : 'Nothing planned yet. Drag tasks here to plan them for this day.') : ''}</ul>`;
+  }
+  if (isToday && (!prog.split || open.filter((i) => !E.isDaily(i.t)).length < 3)) html += suggestionsHtml(ctx, items);
   if (missed.length) html += `<h3 class="list-head">Not done <span class="n">${missed.length}</span></h3><ul class="tasks soft" data-list="none">${missed.map((i) => taskRow(i, ctx, 'past')).join('')}</ul>`;
   if (finished.length) {
     const open_ = ui.showDone || !isToday;
@@ -463,11 +490,17 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   ui.lastProgress = { day: D, doneN: prog.doneN, total: prog.total, key };
 }
 
+// The ring counts the daily routines: that's the realistic list for a day. Other to-dos are extra
+// (they show up as wins when done). With no daily routines at all, everything counts.
 // Optional tasks are a bonus: they count when done but never hold the ring back.
 function progressOf(items) {
-  const doneN = items.filter((i) => i.status === 'done').length;
-  const required = items.filter((i) => i.status === 'open' && !i.t.optional && !i.dueOnly).length;
-  return { doneN, total: doneN + required, left: required };
+  const daily = items.filter((i) => E.isDaily(i.t));
+  const split = daily.some((i) => !i.t.optional);
+  const base = split ? daily : items;
+  const doneN = base.filter((i) => i.status === 'done').length;
+  const required = base.filter((i) => i.status === 'open' && !i.t.optional && !i.dueOnly).length;
+  const extras = split ? items.filter((i) => !E.isDaily(i.t) && i.status === 'done').length : 0;
+  return { doneN, total: doneN + required, left: required, extras, split };
 }
 
 const pick = (list, seed) => {
@@ -501,6 +534,7 @@ function cheerHtml(ctx, D, prog, isToday) {
     line = `${greet} ${msg}`;
   }
   const subs = [];
+  if (prog.extras) subs.push(`${prog.extras} to-do${prog.extras === 1 ? '' : 's'} done too`);
   if (minsDone >= 10) subs.push(`${E.fmtMins(minsDone)} of work done`);
   if (isToday) {
     let best = null;
@@ -1536,7 +1570,7 @@ function applyPlan(data, ids, today) {
     };
     const pulled = [];
     const deferred = [];
-    for (const p of data.pull || []) {
+    for (const p of (data.pull || []).slice(0, 3)) {
       const t = find(p.id);
       if (!t || t.doneDay) continue;
       moveTask(s, t, today, today);
@@ -2111,6 +2145,7 @@ function swipeActions(g) {
   const t = store.task(g.id);
   // A daily routine is on every day, so "later" means skipping this one.
   if (g.list.dataset.list === 'day' && D >= today && t?.repeat?.kind === 'daily') return { skip: D, label: D === today ? 'Skip today' : 'Skip', icon: I.skip };
+  if (g.list.classList.contains('todo-list') && D === today && !t?.deadline && !(t?.repeat && !['interval', 'weekflex'].includes(t.repeat.kind))) return { day: null, label: 'Not today', icon: I.x };
   if (g.list.dataset.list === 'day' && D >= today) {
     const next = E.addDays(D, 1);
     return { day: next, label: next === E.addDays(today, 1) ? 'Tomorrow' : E.fmtRelDay(next, today), icon: I.calendar };
@@ -2184,7 +2219,7 @@ function swipeDo(g, dir) {
     undoToast(`Skipped “${t.title}”${g.move.skip === today ? ' today' : ''}`, lastStep());
   } else {
     store.moveTo(t.id, g.move.day);
-    undoToast(`Moved to ${relWord(g.move.day, today)}`, lastStep());
+    undoToast(g.move.day ? `Moved to ${relWord(g.move.day, today)}` : 'Moved to Everything else', lastStep());
   }
 }
 
@@ -2332,8 +2367,11 @@ function onPointerUp(e) {
   const today = store.today;
   if (list.dataset.list === 'day') {
     const D = list.dataset.day;
-    const ids = [...list.querySelectorAll(':scope > li.task')].map((li) => li.dataset.id);
+    const scope = list.closest('#dayCol, .view-calendar') || list.parentElement;
+    const lists = [...scope.querySelectorAll(`[data-list="day"][data-day="${D}"]`)];
+    const ids = lists.flatMap((l) => [...l.querySelectorAll(':scope > li.task')].map((li) => li.dataset.id).concat((l.dataset.rest || '').split(',').filter(Boolean)));
     const fromDay = d.src.dataset.list === 'day' && d.src.dataset.day === D;
+    if (!fromDay) ui.fresh.set(t.id, Date.now());
     store.transact(fromDay ? 'Reordered' : `Planned “${t.title}”`, (s) => {
       if (!fromDay) moveTask(s, t, D, today);
       s.meta.order[D] = { ids, at: Date.now(), by: 'you' };
@@ -2428,6 +2466,9 @@ function onClick(e) {
       return id && openMenu(a, id, li?.dataset.day);
     case 'gate-skip':
       store.setDevice({ localOnly: true });
+      return render();
+    case 'todos-all':
+      ui.todosAll = !ui.todosAll;
       return render();
     case 'agenda':
       ui.agendaAll = !ui.agendaAll;
@@ -2849,6 +2890,11 @@ function boot() {
   staticChrome();
   bindEvents();
   store.onStep = (kind, step) => (kind === 'undo' ? stepUndone(step) : stepRedone(step));
+  const moveTo = store.moveTo.bind(store);
+  store.moveTo = (id, day, ...rest) => {
+    if (day) ui.fresh.set(id, Date.now());
+    return moveTo(id, day, ...rest);
+  };
   store.subscribe((reason) => {
     if (reason === 'device') {
       renderTop();

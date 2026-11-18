@@ -2358,6 +2358,27 @@ dialog::backdrop {
   margin-bottom: 10px;
 }
 
+/* ---------- Today: dailies, then a few to-dos ---------- */
+.list-head .lh-note {
+  margin-left: auto;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--faint);
+}
+.more-btn {
+  margin: 2px 0 0;
+  padding: 8px 0;
+  font-size: 13.5px;
+  font-weight: 580;
+  color: var(--muted);
+}
+.more-btn:hover {
+  color: var(--ink);
+}
+.todo-list .empty-drop {
+  display: none;
+}
+
 /* ---------- smart send ---------- */
 .add-btn.ai {
   background: var(--spruce);
