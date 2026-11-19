@@ -14,6 +14,8 @@ export const DEFAULT_SHARED = {
   autoPlan: true,
   autoPlanHour: 6,
   calendars: {},
+  sortBy: 'plan', // plan | priority | due | quick | big | <saved sort id>
+  sorts: [], // your saved Claude sorts: { id, name, prompt }
   updatedAt: 0,
 };
 export const DEFAULT_DEVICE = {
@@ -405,11 +407,12 @@ export function diffStates(before, after) {
     log: diffList(before.log, after.log),
     order: diffMap(before.meta.order, after.meta.order),
     plans: diffMap(before.meta.plans, after.meta.plans),
+    sorted: diffMap(before.meta.sorted || {}, after.meta.sorted || {}),
     dismiss: diffMap(before.meta.dismiss, after.meta.dismiss),
     timer: same(before.meta.timer, after.meta.timer) ? null : { before: clone(before.meta.timer), after: clone(after.meta.timer) },
     seeded: before.meta.seeded !== after.meta.seeded ? { before: before.meta.seeded, after: after.meta.seeded } : null,
   };
-  d.count = d.tasks.length + d.log.length + d.order.length + d.plans.length + d.dismiss.length + (d.timer ? 1 : 0) + (d.seeded ? 1 : 0);
+  d.count = d.tasks.length + d.log.length + d.order.length + d.plans.length + d.sorted.length + d.dismiss.length + (d.timer ? 1 : 0) + (d.seeded ? 1 : 0);
   return d;
 }
 export function applyDiff(s, d, side) {
@@ -429,6 +432,7 @@ export function applyDiff(s, d, side) {
   };
   for (const ch of d.order) putMap(s.meta.order, ch, { ids: [], at: now, cleared: true });
   for (const ch of d.plans) putMap(s.meta.plans, ch, { removed: true, at: now });
+  for (const ch of d.sorted || []) putMap((s.meta.sorted ||= {}), ch, { by: {}, at: now });
   for (const ch of d.dismiss) s.meta.dismiss[ch.k] = clone(ch[side]) || [];
   if (d.timer) s.meta.timer = { ...(clone(d.timer[side]) || { id: null }), updatedAt: now };
   if (d.seeded) s.meta.seeded = d.seeded[side];

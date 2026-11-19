@@ -166,6 +166,34 @@ export function birthdayName(title) {
   return null;
 }
 
+// Quick sorts for a day's open items (the default order comes from Claude's plan and your drags).
+export const SORTS = {
+  plan: 'Suggested',
+  priority: 'Priority',
+  due: 'Due date',
+  quick: 'Quickest first',
+  big: 'Biggest first',
+};
+export function sortOpen(items, how) {
+  const mid = (i) => estMid(i.t);
+  const due = (i) => i.t.deadline || '9999-12-31';
+  const keep = new Map(items.map((i, k) => [i, k]));
+  const cmp = {
+    priority: (a, b) => a.t.priority - b.t.priority || due(a).localeCompare(due(b)),
+    due: (a, b) => due(a).localeCompare(due(b)) || a.t.priority - b.t.priority,
+    quick: (a, b) => (mid(a) ?? 1e9) - (mid(b) ?? 1e9) || a.t.priority - b.t.priority,
+    big: (a, b) => (mid(b) ?? -1) - (mid(a) ?? -1) || a.t.priority - b.t.priority,
+  }[how];
+  if (!cmp) return items;
+  return [...items].sort((a, b) => cmp(a, b) || keep.get(a) - keep.get(b));
+}
+// Put items in a saved order (ids); anything new keeps its place after them.
+export function applyOrder(items, ids) {
+  const pos = new Map((ids || []).map((id, k) => [id, k]));
+  const keep = new Map(items.map((i, k) => [i, k]));
+  return [...items].sort((a, b) => (pos.get(a.id) ?? 1e6 + keep.get(a)) - (pos.get(b.id) ?? 1e6 + keep.get(b)));
+}
+
 // The day's backbone: routines that come back every day (or every weekday).
 export function isDaily(t) {
   const r = t?.repeat;
@@ -733,6 +761,7 @@ export function mergeStates(local, remote) {
     meta: {
       order: mergeKeyed(lm.order, rm.order),
       plans: mergeKeyed(lm.plans, rm.plans),
+      sorted: mergeKeyed(lm.sorted, rm.sorted),
       dismiss,
       timer,
       seeded: !!(lm.seeded || rm.seeded),
@@ -762,7 +791,7 @@ export function prune(state, today, now = Date.now()) {
   state.tasks = state.tasks.filter((t) => !(t.purged && (t.updatedAt || 0) < tombstoneCutoff));
   state.log = state.log.filter((e) => !(e.deleted && (e.updatedAt || 0) < tombstoneCutoff));
   const oldest = addDays(today, -60);
-  for (const key of ['order', 'plans', 'dismiss']) {
+  for (const key of ['order', 'plans', 'dismiss', 'sorted']) {
     const m = state.meta?.[key];
     if (m) for (const d of Object.keys(m)) if (d < oldest) delete m[d];
   }

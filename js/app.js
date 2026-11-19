@@ -100,6 +100,7 @@ function revertStep(step) {
     }
     for (const ch of step.diff.order) s.meta.order[ch.k] = ch.before ? { ...ch.before, at: Date.now() } : { ids: [], at: Date.now(), cleared: true };
     for (const ch of step.diff.plans) s.meta.plans[ch.k] = ch.before ? { ...ch.before, at: Date.now() } : { removed: true, at: Date.now() };
+    for (const ch of step.diff.sorted || []) (s.meta.sorted ||= {})[ch.k] = ch.before ? { ...ch.before, at: Date.now() } : { by: {}, at: Date.now() };
   }, { meta: { reverts: step } });
   stepUndone(step);
   return store.undoStack.length > before ? lastStep() : null;
@@ -126,6 +127,7 @@ function backMessage(step, kind) {
 function stepUndone(step) {
   if (!step) return;
   if (step.meta?.reverts) return stepRedone(step.meta.reverts);
+  if (step.meta?.sortTo) store.setShared({ sortBy: step.meta.sortFrom || 'plan' });
   if (ui.ai && ui.ai.status !== 'busy' && ui.ai.step === step) {
     ui.ai = null;
     renderAIPanel();
@@ -135,6 +137,7 @@ function stepUndone(step) {
 function stepRedone(step) {
   if (!step) return;
   if (step.meta?.reverts) return stepUndone(step.meta.reverts);
+  if (step.meta?.sortTo) store.setShared({ sortBy: step.meta.sortTo });
   if (step.meta?.input) clearComposer(step.meta);
   if (step.meta?.ai && (!ui.ai || ui.ai.status !== 'busy')) {
     ui.ai = step.meta.ai;
@@ -245,6 +248,135 @@ function render() {
   renderComposerMeta();
   // Re-render the drawer only for changes made elsewhere, never mid-edit (it would swallow clicks and focus).
   if (ui.drawer && !ui.fromDrawer && !$('#drawer').contains(document.activeElement)) renderDrawer();
+}
+
+/* ---------- sorting ---------- */
+
+const sortName = (key) => E.SORTS[key] || store.settings.sorts?.find((x) => x.id === key)?.name || 'Suggested';
+const isClaudeSort = (key) => !E.SORTS[key];
+
+// The day's open items in the order you picked: Claude's plan (default), a quick sort, or one of
+// your saved Claude sorts (cached per day, worked out the first time you open the day).
+function sortDay(open, D, ctx) {
+  const key = store.settings.sortBy || 'plan';
+  if (key === 'plan') return open;
+  if (E.SORTS[key]) return E.sortOpen(open, key);
+  const saved = store.settings.sorts?.find((x) => x.id === key);
+  if (!saved) return open;
+  const cached = ctx.s.meta.sorted?.[D]?.by?.[key];
+  if (cached) return E.applyOrder(open, cached);
+  const tried = (ui.sortTried ||= new Set());
+  if (D >= ctx.today && store.device.apiKey && !ui.sorting && open.length > 1 && !tried.has(`${key}|${D}`)) {
+    tried.add(`${key}|${D}`);
+    setTimeout(() => runSort({ key, D }), 0);
+  }
+  return open;
+}
+
+async function runSort({ key, prompt, D = ui.day || store.today, save = false }) {
+  const saved = key ? store.settings.sorts?.find((x) => x.id === key) : null;
+  const instruction = (prompt || saved?.prompt || '').trim();
+  if (!instruction || ui.sorting) return;
+  if (!store.device.apiKey) return toast('Add your Claude key in Settings to sort with Claude.');
+  const ctx = ctxNow();
+  const items = E.orderOpen(E.dayItems(ctx.s, ctx.idx, D, ctx.today, ctx.settings).filter((i) => i.status === 'open'), D, ctx.s, ctx.sc);
+  if (items.length < 2) return toast('Nothing to sort yet.');
+  ui.sorting = { key: key || 'new', text: instruction };
+  render();
+  try {
+    const { ids, content } = AI.sortContext({ items, today: D, now: new Date(), eventsOn: google.configured ? (d) => google.eventsOn(d) : null, instruction });
+    const r = await AI.callClaude({ apiKey: store.device.apiKey, model: store.device.model, effort: store.device.effort, system: AI.SORT_SYSTEM, content, schema: AI.SORT_SCHEMA, maxTokens: 3000 });
+    const order = [...new Set((r.data.order || []).map((x) => ids.long(x)).filter(Boolean))];
+    if (!order.length) throw new Error('Claude didn’t return an order. Try again.');
+    let id = key;
+    const sortFrom = store.settings.sortBy || 'plan';
+    if (!id) {
+      id = E.uid('s');
+      store.setShared({ sorts: [...(store.settings.sorts || []).filter((x) => !x.temp), { id, name: shortSortName(instruction), prompt: instruction, temp: !save }] });
+    }
+    store.transact(`Sorted: ${sortName(id)}`, (s) => {
+      const day = (s.meta.sorted ||= {})[D] || { by: {} };
+      day.by = { ...day.by, [id]: order };
+      day.at = Date.now();
+      s.meta.sorted[D] = day;
+    }, { meta: { sortFrom, sortTo: id } });
+    if (store.settings.sortBy !== id) store.setShared({ sortBy: id });
+    toast(String(r.data.reply || 'Sorted.').slice(0, 140));
+  } catch (e) {
+    toast(e.message || 'Sorting didn’t work. Try again.');
+  } finally {
+    ui.sorting = null;
+    render();
+  }
+}
+
+const shortSortName = (text) => {
+  const t = String(text).trim().replace(/^(please\s+)?(sort|order|reorder|organi[sz]e|prioriti[sz]e)\s+(my\s+)?(tasks|list|day|things)?\s*(by|with|so)?\s*/i, '');
+  const n = t.charAt(0).toUpperCase() + t.slice(1);
+  return n.length > 32 ? `${n.slice(0, 30).trim()}…` : n || 'My sort';
+};
+
+function openSortMenu(anchor) {
+  const m = $('#menu');
+  const cur = store.settings.sortBy || 'plan';
+  const sorts = (store.settings.sorts || []).filter((x) => !x.temp || x.id === cur);
+  const hasKey = !!store.device.apiKey;
+  const opt = (key, label, note = '') => `<button type="button" class="mi${key === cur ? ' on' : ''}" role="menuitemradio" aria-checked="${key === cur}" data-sort="pick" data-v="${esc(key)}">${key === cur ? I.tick : '<i class="mi-dot"></i>'}${esc(label)}${note ? `<small>${esc(note)}</small>` : ''}</button>`;
+  m.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><div class="m-title">Sort today</div>
+${opt('plan', 'Suggested', 'Claude’s plan + your drags')}
+${['priority', 'due', 'quick', 'big'].map((k) => opt(k, E.SORTS[k])).join('')}
+${sorts.length ? `<hr><div class="m-title">Your sorts</div>${sorts.map((x) => `<div class="mi-row">${opt(x.id, x.name)}${x.temp ? `<button type="button" class="mi-x" data-sort="keep" data-v="${esc(x.id)}" title="Save this sort">${I.plus}</button>` : `<button type="button" class="mi-x" data-sort="del" data-v="${esc(x.id)}" aria-label="Delete “${esc(x.name)}”">${I.x}</button>`}</div>`).join('')}` : ''}
+${hasKey ? `<hr><form class="m-ask" data-sort-form><input class="inp" name="q" placeholder="Ask Claude: school first, chores last…" autocomplete="off" aria-label="How should Claude sort today?"><button type="submit" class="btn">Sort</button></form>
+<label class="m-check"><input type="checkbox" name="keep" checked>Save it for later</label>
+${isClaudeSort(cur) || cur === 'plan' ? `<button type="button" class="mi" data-sort="resort">${I.spark}${cur === 'plan' ? 'Re-plan with Claude' : `Re-sort “${esc(sortName(cur))}”`}</button>` : ''}` : ''}`;
+  m.hidden = false;
+  m.classList.add('sort-menu');
+  if (isMobile()) $('#scrim').hidden = false;
+  const col = anchor.closest('.col, .view-calendar');
+  ui.menuFor = { sort: true, anchor, col, top: col?.scrollTop ?? 0 };
+  anchor.setAttribute('aria-expanded', 'true');
+  if (!isMobile()) {
+    const r = anchor.getBoundingClientRect();
+    const mw = m.offsetWidth;
+    const mh = m.offsetHeight;
+    let top = r.bottom + 6;
+    if (top + mh > window.innerHeight - 8) top = Math.max(8, r.top - mh - 6);
+    m.style.left = `${Math.max(8, Math.min(window.innerWidth - mw - 8, r.left))}px`;
+    m.style.top = `${top}px`;
+  }
+  m.querySelector('.mi.on')?.focus({ preventScroll: true });
+  m.querySelector('[data-sort-form]')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = e.target.q.value.trim();
+    if (!q) return e.target.q.focus();
+    const keep = m.querySelector('.m-check input')?.checked;
+    closeMenu();
+    runSort({ prompt: q, save: keep });
+  });
+}
+
+function onSortMenu(act, el) {
+  const key = el.dataset.v;
+  if (act === 'pick') {
+    closeMenu();
+    if (key !== (store.settings.sortBy || 'plan')) store.setShared({ sortBy: key });
+    return;
+  }
+  if (act === 'del') {
+    store.setShared({ sorts: (store.settings.sorts || []).filter((x) => x.id !== key), ...(store.settings.sortBy === key ? { sortBy: 'plan' } : {}) });
+    return openSortMenu(ui.menuFor?.anchor || $('#sortBtn'));
+  }
+  if (act === 'keep') {
+    store.setShared({ sorts: (store.settings.sorts || []).map((x) => (x.id === key ? { ...x, temp: false } : x)) });
+    toast('Saved. It’s in Sort whenever you want it.');
+    return openSortMenu(ui.menuFor?.anchor || $('#sortBtn'));
+  }
+  if (act === 'resort') {
+    closeMenu();
+    const cur = store.settings.sortBy || 'plan';
+    if (cur === 'plan') return planDay();
+    return runSort({ key: cur });
+  }
 }
 
 /* ---------- birthdays ---------- */
@@ -460,7 +592,7 @@ function renderDay(ctx) {
   const isToday = D === today;
   const isPast = D < today;
   const items = E.dayItems(ctx.s, ctx.idx, D, today, ctx.settings);
-  const open = E.orderOpen(items.filter((i) => i.status === 'open'), D, ctx.s, ctx.sc);
+  const open = sortDay(E.orderOpen(items.filter((i) => i.status === 'open'), D, ctx.s, ctx.sc), D, ctx);
   const finished = items
     .filter((i) => i.status === 'done' || i.status === 'skip')
     .sort((a, b) => String(b.entry?.at || b.t.doneAt || '').localeCompare(String(a.entry?.at || a.t.doneAt || '')));
@@ -499,8 +631,11 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const daily = open.filter((i) => E.isDaily(i.t));
   const todos = open.filter((i) => !E.isDaily(i.t));
   const split = store.device.todayView === 'split';
-  if (prog.split && todos.length && !isPast) {
-    html += `<div class="list-bar"><div class="seg sm" role="group" aria-label="Show the list">${['together', 'split'].map((v) => `<button type="button" data-act="today-view" data-v="${v}" aria-pressed="${(v === 'split') === split}">${v === 'split' ? 'Dailies first' : 'All in order'}</button>`).join('')}</div></div>`;
+  if (!isPast && open.length > 1) {
+    const sortKey = store.settings.sortBy || 'plan';
+    const busy = ui.sorting ? `<span class="sorting">${I.spark}<span class="shimmer">Claude is sorting…</span></span>` : '';
+    const look = prog.split && todos.length ? `<div class="seg sm" role="group" aria-label="Show the list">${['together', 'split'].map((v) => `<button type="button" data-act="today-view" data-v="${v}" aria-pressed="${(v === 'split') === split}">${v === 'split' ? 'Dailies first' : 'All in order'}</button>`).join('')}</div>` : '';
+    html += `<div class="list-bar">${busy}<button type="button" class="sort-btn${sortKey !== 'plan' ? ' on' : ''}" id="sortBtn" data-act="sort" aria-haspopup="menu">${I.sort}<span>${esc(sortName(sortKey))}</span></button>${look}</div>`;
   }
   if (split && prog.split && !isPast) {
     // Split look: daily routines, then a short to-do section (top few, the rest folded).
@@ -1027,6 +1162,7 @@ function renderAIPanel() {
   if (r.updated.length) chips.push(`Updated ${r.updated.length}`);
   if (r.completed.length) chips.push(`Completed ${r.completed.length}`);
   if (r.removed.length) chips.push(`Deleted ${r.removed.length}`);
+  if (r.sorted) chips.push('Sorted today');
   const any = chips.length > 0;
   const detail = [];
   for (const id of r.created) {
@@ -1047,7 +1183,7 @@ function renderAIPanel() {
     })
     .join('');
   el.innerHTML = `<div class="ai-head">${I.spark}<p class="ai-reply">${esc(r.reply || (any ? 'Done.' : 'No changes.'))}</p><button type="button" class="icon-btn sm" data-ai="close" aria-label="Close">${I.x}</button></div>
-${any ? `<div class="ai-changes">${chips.map((c) => `<span class="chip-btn" style="box-shadow:none;background:var(--spruce-soft);color:var(--spruce)">${c}</span>`).join('')}<button type="button" class="chip-btn" data-ai="details">${a.showDetails ? 'Hide details' : 'Details'}</button>${a.step ? `<button type="button" class="chip-btn" data-ai="undo">${I.undo}Undo</button>` : ''}</div>${a.showDetails ? `<ul class="ai-detail">${detail.join('')}</ul>` : ''}` : ''}
+${any ? `<div class="ai-changes">${chips.map((c) => `<span class="chip-btn" style="box-shadow:none;background:var(--spruce-soft);color:var(--spruce)">${c}</span>`).join('')}<button type="button" class="chip-btn" data-ai="details">${a.showDetails ? 'Hide details' : 'Details'}</button>${r.sorted && store.settings.sorts?.find((x) => x.id === r.sorted.id)?.temp ? `<button type="button" class="chip-btn" data-ai="save-sort">${I.plus}Save this sort</button>` : ''}${a.step ? `<button type="button" class="chip-btn" data-ai="undo">${I.undo}Undo</button>` : ''}</div>${a.showDetails ? `<ul class="ai-detail">${detail.join('')}</ul>` : ''}` : ''}
 ${qs ? `<div class="ai-qs">${qs}</div>` : ''}`;
 }
 
@@ -1115,7 +1251,7 @@ function watchViewport() {
     root.style.setProperty('--kb', `${kb}px`);
     if (vv) root.style.setProperty('--vvh', `${Math.round(vv.height)}px`);
     const ae = document.activeElement;
-    root.classList.toggle('kb-open', coarse() && isMobile() && !!ae?.closest?.('#dock') && ae.matches('textarea, input'));
+    root.classList.toggle('kb-open', coarse() && isMobile() && !!ae?.closest?.('#dock, #menu') && ae.matches('textarea, input:not([type=checkbox])'));
   };
   const soon = () => {
     if (!raf) raf = requestAnimationFrame(update);
@@ -1305,6 +1441,7 @@ function closeMenu() {
   const m = $('#menu');
   if (m.hidden) return;
   m.hidden = true;
+  m.classList.remove('sort-menu');
   m.style.transform = '';
   if (!ui.drawer) $('#scrim').hidden = true;
   ui.menuFor?.anchor?.setAttribute('aria-expanded', 'false');
@@ -1445,7 +1582,8 @@ async function askClaude(textArg) {
   const slowTimer = setTimeout(renderAIPanel, 15000);
   const ctx = ctxNow();
   try {
-    const { ids, snapshot } = AI.commandContext({ state: store.state, idx: ctx.idx, today: ctx.today, now: new Date(), events: google.configured ? google.windowEvents(14) : null, eventsOn: (D) => google.eventsOn(D), settings: ctx.settings });
+    const todayIds = sortDay(E.orderOpen(E.dayItems(ctx.s, ctx.idx, ctx.today, ctx.today, ctx.settings).filter((i) => i.status === 'open'), ctx.today, ctx.s, ctx.sc), ctx.today, ctx).map((i) => i.id);
+    const { ids, snapshot } = AI.commandContext({ state: store.state, idx: ctx.idx, today: ctx.today, now: new Date(), events: google.configured ? google.windowEvents(14) : null, eventsOn: (D) => google.eventsOn(D), settings: ctx.settings, todayIds });
     const r = await AI.callClaude({
       apiKey: store.device.apiKey,
       model: store.device.model || AI.DEFAULT_MODEL,
@@ -1484,7 +1622,10 @@ async function askClaude(textArg) {
 function applyCommand(data, ids, text = '') {
   const today = store.today;
   const refs = new Map();
-  const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null };
+  const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null, sorted: null };
+  const order = [...new Set((data.order || []).map((x) => ids.long(x)).filter((id) => id && store.task(id)))];
+  const sid = order.length > 1 ? E.uid('s') : null;
+  const sortFrom = store.settings.sortBy || 'plan';
   const before = store.undoStack.length;
   store.transact('Claude’s changes', (s) => {
     for (const c of data.create || []) {
@@ -1531,7 +1672,16 @@ function applyCommand(data, ids, text = '') {
       t.updatedAt = Date.now();
       out.removed.push(id);
     }
-  }, { meta: { input: text, mode: 'ask' } });
+    if (sid) {
+      // A sort request from the chat box: keep it as a one-off sort you can save from the panel.
+      const day = (s.meta.sorted ||= {})[today] || { by: {} };
+      day.by = { ...day.by, [sid]: order };
+      day.at = Date.now();
+      s.meta.sorted[today] = day;
+      out.sorted = { id: sid, prompt: text };
+    }
+  }, { meta: { input: text, mode: 'ask', ...(sid ? { sortFrom, sortTo: sid } : {}) } });
+  if (out.sorted) store.setShared({ sorts: [...(store.settings.sorts || []).filter((x) => !x.temp), { id: out.sorted.id, name: shortSortName(text), prompt: text, temp: true }], sortBy: out.sorted.id });
   if (store.undoStack.length > before) out.step = lastStep();
   for (const q of data.questions || []) {
     const taskId = refs.get(String(q.target).trim()) || ids.long(q.target);
@@ -2423,6 +2573,10 @@ function onPointerUp(e) {
     const ids = lists.flatMap((l) => [...l.querySelectorAll(':scope > li.task')].map((li) => li.dataset.id).concat((l.dataset.rest || '').split(',').filter(Boolean)));
     const fromDay = d.src.dataset.list === 'day' && d.src.dataset.day === D;
     if (!fromDay) ui.fresh.set(t.id, Date.now());
+    if ((store.settings.sortBy || 'plan') !== 'plan') {
+      store.setShared({ sortBy: 'plan' });
+      toast('Switched to Suggested, with your order');
+    }
     store.transact(fromDay ? 'Reordered' : `Planned “${t.title}”`, (s) => {
       if (!fromDay) moveTask(s, t, D, today);
       s.meta.order[D] = { ids, at: Date.now(), by: 'you' };
@@ -2479,6 +2633,9 @@ function onClick(e) {
     if (m.dataset.m === 'pick') return;
     return onMenu(m.dataset.m, m);
   }
+  const so = e.target.closest('[data-sort]');
+  if (so && so.closest('#menu')) return onSortMenu(so.dataset.sort, so);
+  if (e.target.closest('#menu.sort-menu')) return;
   const menuAnchor = ui.menuFor?.anchor || null;
   if (!$('#menu').hidden && !e.target.closest('#menu')) closeMenu();
   const st = e.target.closest('[data-st]');
@@ -2518,6 +2675,9 @@ function onClick(e) {
     case 'gate-skip':
       store.setDevice({ localOnly: true });
       return render();
+    case 'sort':
+      if (ui.menuFor?.sort) return closeMenu();
+      return openSortMenu(a);
     case 'today-view':
       store.setDevice({ todayView: a.dataset.v });
       return render();
@@ -2647,6 +2807,12 @@ function onClick(e) {
 function onAI(act, el) {
   const a = ui.ai;
   if (!a) return;
+  if (act === 'save-sort' && a.result?.sorted) {
+    const id = a.result.sorted.id;
+    store.setShared({ sorts: (store.settings.sorts || []).map((x) => (x.id === id ? { ...x, temp: false } : x)) });
+    renderAIPanel();
+    return toast(`Saved “${sortName(id)}”. Pick it any day from Sort.`);
+  }
   if (act === 'close') {
     ui.ai = null;
     return renderAIPanel();

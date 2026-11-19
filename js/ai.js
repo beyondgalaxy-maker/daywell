@@ -47,7 +47,7 @@ const TASK_FIELDS = {
 export const COMMAND_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['create', 'update', 'complete', 'remove', 'questions', 'reply'],
+  required: ['create', 'update', 'complete', 'remove', 'questions', 'order', 'reply'],
   properties: {
     create: {
       type: 'array',
@@ -83,9 +83,44 @@ export const COMMAND_SCHEMA = {
         },
       },
     },
+    order: { type: 'array', items: { type: 'string' } },
     reply: { type: 'string' },
   },
 };
+
+export const SORT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['order', 'reply'],
+  properties: {
+    order: { type: 'array', items: { type: 'string' } },
+    reply: { type: 'string' },
+  },
+};
+
+export const SORT_SYSTEM = `You sort the person's list for today in Daywell, a minimalist task app, the way they ask. You get their instruction and a JSON snapshot: the current time, today's calendar events, and today's open tasks (id, title, whether it's a daily routine, estimate, priority 1 to 4, deadline, area, notes, how long it has waited).
+
+order: every task id exactly once, first thing to do first, following the instruction. Where the instruction doesn't decide, use sensible defaults: anything due today or overdue and priority 1 early, work that fits around the calendar, and short tasks as warm-ups.
+reply: one short, friendly sentence on how you sorted it (no ids), written last.`;
+
+export function sortContext({ items, today, now, eventsOn, instruction }) {
+  const ids = new IdMap();
+  const tasks = items.map((i) => {
+    const t = i.t;
+    const o = { id: ids.short(t.id), title: t.title, daily: E.isDaily(t) };
+    const est = E.fmtEst(t.estMin, t.estMax);
+    if (est) o.estimate = est;
+    if (t.priority !== 3) o.priority = t.priority;
+    if (t.deadline) o.deadline = t.deadline;
+    if (t.area) o.area = t.area;
+    if (t.notes) o.notes = t.notes.slice(0, 160);
+    if (t.optional) o.optional = true;
+    if (!t.repeat && t.createdAt) o.waitingDays = Math.max(0, Math.round((now - t.createdAt) / 86400000));
+    return o;
+  });
+  const events = eventsOn ? eventsOn(today).map((ev) => eventLine(ev, today)) : [];
+  return { ids, content: `Instruction: ${instruction}\n\n${JSON.stringify({ now: nowLine(now), today, events, tasks })}` };
+}
 
 const idReason = (extra = {}) => ({
   type: 'object',
@@ -136,6 +171,7 @@ Creating tasks
 - Titles: short, in the person's own words. Capitalize the first letter, fix obvious typos, drop filler like "I need to" or "remember to". Never expand abbreviations or names you aren't sure about (for example "Step" or "EQ"). Extra detail goes in notes; otherwise notes is "".
 - If the message is a question or asks for advice ("what should I do now?", "I have 30 minutes"), create nothing and answer in reply. Be concrete: use minutes until the next event, task estimates (or typical minutes), deadlines, and what has been waiting or pushed back. Name specific tasks that fit.
 - If they ask you to schedule or plan something ("fit the essay in this week", "when should I do laundry?"), pick a day with room in the 7-day table and set date; say which day and why in reply.
+- order: only when they ask to sort, reorder or prioritize today's list ("school stuff first", "quick ones first", "hard things in the morning"): every id from todayList exactly once, in the new order, first thing first. Otherwise leave it empty. Say how you sorted it in reply.
 
 Time estimates (estMin/estMax in minutes)
 - If they state a duration, use it exactly and keep ranges (2–3 hours → 120 and 180).
@@ -392,7 +428,7 @@ function timeContext({ state, idx, today, now, eventsOn, settings }) {
   };
 }
 
-export function commandContext({ state, idx, today, now, events, eventsOn, settings }) {
+export function commandContext({ state, idx, today, now, events, eventsOn, settings, todayIds = [] }) {
   const ids = new IdMap();
   const ws = settings.weekStart ?? 1;
   const open = state.tasks.filter((t) => !t.deletedAt && !t.purged && !(t.doneDay && t.doneDay !== today));
@@ -409,6 +445,7 @@ export function commandContext({ state, idx, today, now, events, eventsOn, setti
     ...timeContext({ state, idx, today, now, eventsOn, settings }),
     upcomingEvents: events ? events.filter((ev) => !(ev.allDay ? ev.startDay <= today && ev.endDay > today : E.keyFromDate(new Date(ev.start)) === today)).slice(0, 60).map((ev) => eventLine(ev, today)) : 'calendar not connected',
     tasks,
+    todayList: todayIds.map((id) => ids.short(id)),
     areas,
   };
   return { ids, snapshot };
