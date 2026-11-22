@@ -229,10 +229,20 @@ export class Store {
   }
 
   /* ---------- task changes ---------- */
-  addTasks(list, { label, src = 'manual', meta = null } = {}) {
+  // `again`: tasks you typed again that are already on your list. They move up (and take a date
+  // if you gave one) in the same undoable step instead of being added twice.
+  addTasks(list, { label, src = 'manual', meta = null, again = [] } = {}) {
     const today = this.today;
     const made = [];
-    this.transact(label || (list.length === 1 ? `Added “${E.cleanTitle(list[0].title)}”` : `Added ${list.length} tasks`), (s) => {
+    const first = list[0] ? `Added “${E.cleanTitle(list[0].title)}”` : `Moved up “${this.task(again[0]?.id)?.title || 'a task'}”`;
+    this.transact(label || (list.length + again.length === 1 ? first : list.length ? `Added ${list.length} task${list.length === 1 ? '' : 's'}` : `Moved up ${again.length} tasks`), (s) => {
+      for (const a of again) {
+        const t = s.tasks.find((x) => x.id === a.id);
+        if (!t) continue;
+        t.again = { n: Math.min(9, E.againCount(t, today) + 1), at: Date.now() };
+        if (a.date && !t.repeat) t.date = a.date;
+        t.updatedAt = Date.now();
+      }
       for (const f of list) {
         const t = E.normalizeTask({ ...f, id: undefined, src, createdAt: Date.now(), updatedAt: Date.now() }, today);
         s.tasks.push(t);

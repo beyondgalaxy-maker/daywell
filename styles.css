@@ -3327,3 +3327,37 @@ body {
 .bk-list ul {
   margin-top: 4px;
 }
+.ai-same {
+  margin: 10px 0 0 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 14px;
+}
+.ai-same li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 32px;
+}
+.ai-same .k {
+  color: var(--muted);
+  font-size: 13px;
+  width: 84px;
+  flex-shrink: 0;
+}
+.ai-same li > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+.ai-same .chip-btn {
+  flex: none;
+}
+@media (max-width: 640px) {
+  .ai-same {
+    margin-left: 0;
+  }
+  .ai-same .k {
+    width: auto;
+  }
+}

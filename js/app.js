@@ -1195,7 +1195,8 @@ function renderAIPanel() {
   if (r.completed.length) chips.push(`Completed ${r.completed.length}`);
   if (r.removed.length) chips.push(`Deleted ${r.removed.length}`);
   if (r.sorted) chips.push('Sorted today');
-  const any = chips.length > 0;
+  const same = r.same || [];
+  const any = chips.length > 0 || same.length > 0;
   const detail = [];
   for (const id of r.created) {
     const t = store.task(id);
@@ -1207,6 +1208,12 @@ function renderAIPanel() {
   for (const u of r.updated) detail.push(`<li><span class="k">Updated</span><span>${esc(title(u.id))} <span class="m-area">${esc([...new Set(u.fields.map((f) => FIELD[f] || f))].join(', '))}</span></span></li>`);
   for (const id of r.completed) detail.push(`<li><span class="k">Done</span><span>${esc(title(id))}</span></li>`);
   for (const id of r.removed) detail.push(`<li><span class="k">Deleted</span><span>${esc(title(id))}</span></li>`);
+  // Already on the list: say so, and let you keep it as its own task if Claude matched wrong.
+  const sameHtml = same.length
+    ? `<ul class="ai-same">${same
+        .map((m, i) => (store.task(m.id) ? `<li><span class="k">${m.split ? 'Kept both' : 'Already there'}</span><span>${esc(title(m.id))}${m.split ? '' : ` <span class="m-area">moved up</span>`}</span>${m.split ? '' : `<button type="button" class="chip-btn" data-ai="split" data-si="${i}" title="Add “${esc(m.said)}” as its own task">Add as new</button>`}</li>` : ''))
+        .join('')}</ul>`
+    : '';
   const qs = a.questions
     .map((q, i) => {
       const t = store.task(q.taskId);
@@ -1215,7 +1222,7 @@ function renderAIPanel() {
     })
     .join('');
   el.innerHTML = `<div class="ai-head">${I.spark}<p class="ai-reply">${esc(r.reply || (any ? 'Done.' : 'No changes.'))}</p><button type="button" class="icon-btn sm" data-ai="close" aria-label="Close">${I.x}</button></div>
-${any ? `<div class="ai-changes">${chips.map((c) => `<span class="chip-btn" style="box-shadow:none;background:var(--spruce-soft);color:var(--spruce)">${c}</span>`).join('')}<button type="button" class="chip-btn" data-ai="details">${a.showDetails ? 'Hide details' : 'Details'}</button>${r.sorted && store.settings.sorts?.find((x) => x.id === r.sorted.id)?.temp ? `<button type="button" class="chip-btn" data-ai="save-sort">${I.plus}Save this sort</button>` : ''}${a.step ? `<button type="button" class="chip-btn" data-ai="undo">${I.undo}Undo</button>` : ''}</div>${a.showDetails ? `<ul class="ai-detail">${detail.join('')}</ul>` : ''}` : ''}
+${sameHtml}${chips.length || a.step ? `<div class="ai-changes">${chips.map((c) => `<span class="chip-btn" style="box-shadow:none;background:var(--spruce-soft);color:var(--spruce)">${c}</span>`).join('')}<button type="button" class="chip-btn" data-ai="details">${a.showDetails ? 'Hide details' : 'Details'}</button>${r.sorted && store.settings.sorts?.find((x) => x.id === r.sorted.id)?.temp ? `<button type="button" class="chip-btn" data-ai="save-sort">${I.plus}Save this sort</button>` : ''}${a.step ? `<button type="button" class="chip-btn" data-ai="undo">${I.undo}Undo</button>` : ''}</div>${a.showDetails ? `<ul class="ai-detail">${detail.join('')}</ul>` : ''}` : ''}
 ${qs ? `<div class="ai-qs">${qs}</div>` : ''}`;
 }
 
@@ -1564,13 +1571,28 @@ function addFromInput() {
     .map((l) => l.replace(/^\s*(?:[-*•]|\d+[.)]|\[ ?\])\s+/, '').trim())
     .filter(Boolean);
   const D = targetDay();
-  const list = lines.map((l) => {
+  // Something you type that's already on your list (or twice in one go) isn't added again: the
+  // one you have moves up instead, and "Add anyway" adds the copy if you meant a second one.
+  const open = new Map();
+  for (const t of store.state.tasks) if (!t.deletedAt && !t.purged && !t.doneDay) open.set(E.sameTitleKey(t.title), t);
+  const seen = new Set();
+  const list = [];
+  const again = [];
+  for (const l of lines) {
     const p = E.parseQuick(l, today, { weekStart: ws });
     const f = { title: p.title, date: p.date, deadline: p.deadline, time: p.time, estMin: p.estMin, estMax: p.estMax, priority: p.priority || 3, repeat: p.repeat, area: p.area, optional: p.optional };
+    const k = E.sameTitleKey(f.title);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    const have = open.get(k);
+    if (have && !f.repeat) {
+      again.push({ id: have.id, date: p.date, f });
+      continue;
+    }
     if (!f.date && !f.repeat && D) f.date = D;
-    return f;
-  });
-  const made = store.addTasks(list, { meta: { input: raw, mode: 'add' } });
+    list.push(f);
+  }
+  const made = store.addTasks(list, { meta: { input: raw, mode: 'add' }, again });
   input.value = '';
   ui.restored = null;
   autoGrow();
@@ -1580,6 +1602,14 @@ function addFromInput() {
     renderAIPanel();
   }
   const where = (t) => (t.repeat ? E.describeRepeat(t.repeat).toLowerCase() : t.date ? (t.date === today ? 'today' : relWord(t.date, today)) : 'Anytime');
+  if (again.length) {
+    const name = store.task(again[0].id)?.title || 'That';
+    const msg = again.length === 1 ? `“${name}” is already on your list, so it moved up` : `${again.length} were already on your list, so they moved up`;
+    return toast(`${made.length ? `Added ${made.length}. ` : ''}${msg}`, { label: 'Add anyway', run: () => {
+      const copies = store.addTasks(again.map((a) => ({ ...a.f, date: a.f.date || (a.f.repeat ? null : D) })), { meta: { input: raw, mode: 'add' } });
+      undoToast(copies.length === 1 ? `Added “${copies[0].title}” as a separate task` : `Added ${copies.length} separate tasks`, lastStep());
+    } });
+  }
   const msg = made.length === 1 ? `Added to ${where(made[0])}` : `Added ${made.length} tasks`;
   undoToast(msg.replace('Added to every', 'Added, repeats every').replace('Added to once', 'Added, once').replace('Added to weekdays', 'Added, repeats on weekdays'), lastStep());
 }
@@ -1654,7 +1684,7 @@ async function askClaude(textArg) {
 function applyCommand(data, ids, text = '') {
   const today = store.today;
   const refs = new Map();
-  const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null, sorted: null, birthdays: [] };
+  const out = { reply: String(data.reply || ''), created: [], updated: [], same: [], completed: [], removed: [], questions: [], step: null, sorted: null, birthdays: [] };
   const order = [...new Set((data.order || []).map((x) => ids.long(x)).filter((id) => id && store.task(id)))];
   const sid = order.length > 1 ? E.uid('s') : null;
   const sortFrom = store.settings.sortBy || 'plan';
@@ -1668,15 +1698,30 @@ function applyCommand(data, ids, text = '') {
       refs.set(String(c.ref || '').trim(), t.id);
       out.created.push(t.id);
     }
+    // Things you said again that are already on your list: no duplicate, it just moves up a bit.
+    for (const m of data.same || []) {
+      const id = ids.long(m.id);
+      const t = id && s.tasks.find((x) => x.id === id);
+      if (!t || t.deletedAt || t.purged || out.same.some((x) => x.id === id)) continue;
+      const n = E.againCount(t, today);
+      t.again = { n: Math.min(9, n + 1), at: Date.now() };
+      t.updatedAt = Date.now();
+      out.same.push({ id, said: String(m.said || '').trim().slice(0, 300) });
+    }
     const merged = new Map();
     for (const u of data.update || []) {
       const id = ids.long(u.id);
       if (!id) continue;
-      merged.set(id, { ...(merged.get(id) || {}), ...AI.changesFromAI(u.set) });
+      const ch = AI.changeFromAI(u.field, u.value);
+      const prev = merged.get(id) || {};
+      if (ch.addNote) ch.addNote = prev.addNote ? `${prev.addNote}\n${ch.addNote}` : ch.addNote;
+      merged.set(id, { ...prev, ...ch });
     }
-    for (const [id, ch] of merged) {
+    for (const [id, ch0] of merged) {
       const t = s.tasks.find((x) => x.id === id);
       if (!t || t.deletedAt || t.purged) continue;
+      const { addNote, ...ch } = ch0;
+      if (addNote && !(ch.notes ?? t.notes ?? '').includes(addNote)) ch.notes = [ch.notes ?? t.notes ?? '', addNote].filter(Boolean).join('\n').slice(0, 4000);
       const eff = {};
       for (const [k, v] of Object.entries(ch)) if (JSON.stringify(t[k] ?? null) !== JSON.stringify(v ?? null)) eff[k] = v;
       if (!Object.keys(eff).length) continue;
@@ -1865,7 +1910,7 @@ function applyPlan(data, ids, today) {
       deferred,
       scheduled,
       focus,
-      suggest: (data.suggest || []).slice(0, 3).map((x) => ({ title: String(x.title || '').slice(0, 140), reason: String(x.reason || '').slice(0, 140), deadline: E.isKey(x.deadline) ? x.deadline : null, estMin: x.estMin ?? null, estMax: x.estMax ?? null })),
+      suggest: (data.suggest || []).slice(0, 3).map((x) => ({ title: String(x.title || '').slice(0, 140), reason: String(x.reason || '').slice(0, 140), deadline: E.isKey(x.deadline) ? x.deadline : null, estMin: x.estMin > 0 ? x.estMin : null, estMax: x.estMax > 0 ? x.estMax : null })),
       rank: [...new Set((data.rank || []).map((x) => ids.long(x)).filter(Boolean))],
       added: [],
     };
@@ -3054,6 +3099,24 @@ function onAI(act, el) {
     return askClaude(text);
   }
   if (act === 'settings') return openSettings('claude');
+  if (act === 'split') {
+    const m = a.result?.same?.[Number(el.dataset.si)];
+    if (!m || m.split || !store.task(m.id)) return;
+    const today = store.today;
+    const p = E.parseQuick(m.said || store.task(m.id).title, today, { weekStart: store.settings.weekStart ?? 1 });
+    const orig = store.task(m.id);
+    store.transact(`Added “${E.cleanTitle(p.title)}” as its own task`, (s) => {
+      const t = s.tasks.find((x) => x.id === m.id);
+      if (t?.again) {
+        t.again = t.again.n > 1 ? { ...t.again, n: t.again.n - 1 } : null;
+        t.updatedAt = Date.now();
+      }
+      s.tasks.push(E.normalizeTask({ title: p.title || orig.title, date: p.date, deadline: p.deadline, time: p.time, estMin: p.estMin, estMax: p.estMax, priority: p.priority || 3, repeat: p.repeat, area: orig.area, optional: p.optional, src: 'ai', createdAt: Date.now(), updatedAt: Date.now() }, today));
+    });
+    m.split = true;
+    undoToast('Added as its own task', lastStep());
+    return renderAIPanel();
+  }
   if (act === 'details') {
     a.showDetails = !a.showDetails;
     return renderAIPanel();

@@ -334,6 +334,7 @@ export function normalizeTask(input, today) {
     plan: isKey(input.plan) ? input.plan : null,
     spent: Math.max(0, Math.round(Number(input.spent) || 0)),
     bumps: Math.max(0, Math.round(Number(input.bumps) || 0)),
+    again: input.again && Number(input.again.n) > 0 ? { n: Math.min(9, Math.round(Number(input.again.n))), at: Number(input.again.at) || now } : null,
     doneAt: input.doneAt || null,
     doneDay: isKey(input.doneDay) ? input.doneDay : null,
     paused: !!input.paused,
@@ -529,6 +530,22 @@ function recurringOn(t, D, today, idx, ws) {
 const PRIORITY_WEIGHT = { 1: 100, 2: 55, 3: 25, 4: 5 };
 export const PRIORITY_NAMES = { 1: 'Urgent', 2: 'High', 3: 'Normal', 4: 'Low' };
 
+// Two titles that are the same task, give or take case, punctuation and a leading "do"/"to".
+export const sameTitleKey = (title) =>
+  String(title || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^(?:(?:to|do|go|the|a|an)\s+)+/, '');
+
+// How many times you've brought a task up again in the last two weeks (0 once that fades).
+export function againCount(t, today) {
+  if (!t?.again?.n || !t.again.at) return 0;
+  return diffDays(keyFromMs(t.again.at), today) < 14 ? t.again.n : 0;
+}
+
 export function scoreTask(t, { today, idx, weekStart = 1 }) {
   let s = PRIORITY_WEIGHT[t.priority] ?? 25;
   const why = [];
@@ -562,6 +579,14 @@ export function scoreTask(t, { today, idx, weekStart = 1 }) {
   if (t.bumps) {
     s += Math.min(40, t.bumps * 10);
     if (t.bumps >= 2) why.push(`Pushed back ${t.bumps} times`);
+  }
+  // Brought up again: on your mind, so it moves up a little (fading over two weeks). The priority
+  // you see doesn't change.
+  const again = againCount(t, today);
+  if (again) {
+    const age = Math.max(0, diffDays(keyFromMs(t.again.at), today));
+    s += Math.round(Math.min(3, again) * 14 * (1 - age / 14));
+    why.push(again > 1 ? `You brought it up ${again} more times` : 'You brought it up again');
   }
   if (!t.repeat) {
     if (t.date && t.date < today) {

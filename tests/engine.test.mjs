@@ -331,3 +331,80 @@ test('lostBetween and recoverFrom bring back only what is missing', () => {
   assert.equal(r.state.meta.bdays.sam.name, 'Sam');
   assert.deepEqual(E.lostBetween(before, r.state), { tasks: [], log: [] });
 });
+
+/* ---------- Claude schemas and merges ---------- */
+import * as AI from '../js/ai.js';
+
+test('every schema sent to Claude stays flat: no optional fields, no nullable types', () => {
+  const walk = (node, path, out) => {
+    if (!node || typeof node !== 'object') return out;
+    if (Array.isArray(node.type) || node.anyOf || node.oneOf) out.unions.push(path);
+    if (node.type === 'object' && node.properties) {
+      const req = new Set(node.required || []);
+      for (const k of Object.keys(node.properties)) if (!req.has(k)) out.optional.push(`${path}.${k}`);
+      assert.equal(node.additionalProperties, false, `${path} must not allow extra properties`);
+      for (const [k, v] of Object.entries(node.properties)) walk(v, `${path}.${k}`, out);
+    }
+    if (node.items) walk(node.items, `${path}[]`, out);
+    return out;
+  };
+  for (const [name, schema] of Object.entries({ COMMAND_SCHEMA: AI.COMMAND_SCHEMA, PLAN_SCHEMA: AI.PLAN_SCHEMA, SORT_SCHEMA: AI.SORT_SCHEMA })) {
+    const r = walk(schema, name, { optional: [], unions: [] });
+    assert.deepEqual(r.optional, [], `${name} has optional fields`);
+    assert.deepEqual(r.unions, [], `${name} has nullable/union types`);
+  }
+});
+
+test('Claude field encodings are read safely', () => {
+  assert.deepEqual(AI.estFromAI('30'), { estMin: 30, estMax: 30 });
+  assert.deepEqual(AI.estFromAI('30-60'), { estMin: 30, estMax: 60 });
+  assert.deepEqual(AI.estFromAI('1-2h'), { estMin: 60, estMax: 120 });
+  assert.equal(AI.estFromAI(''), null);
+  assert.deepEqual(AI.repeatFromAI('weekly:1,3,5'), { kind: 'weekly', days: [1, 3, 5] });
+  assert.deepEqual(AI.repeatFromAI('every:14'), { kind: 'interval', every: 14 });
+  assert.deepEqual(AI.repeatFromAI('monthly:15'), { kind: 'monthly', dom: 15 });
+  assert.equal(AI.repeatFromAI(''), null);
+  assert.equal(AI.repeatFromAI('sometimes'), undefined);
+  assert.deepEqual(AI.changeFromAI('date', ''), { date: null });
+  assert.deepEqual(AI.changeFromAI('date', 'tomorrow'), {}, 'unreadable values change nothing');
+  assert.deepEqual(AI.changeFromAI('date', '2026-11-23'), { date: '2026-11-23' });
+  assert.deepEqual(AI.changeFromAI('priority', '2'), { priority: 2 });
+  assert.deepEqual(AI.changeFromAI('priority', '7'), {});
+  assert.deepEqual(AI.changeFromAI('repeat', 'garbage'), {});
+  assert.deepEqual(AI.changeFromAI('estimate', ''), { estMin: null, estMax: null });
+  const f = AI.taskFieldsFromAI({ ref: 'n1', title: 'Call for appointment', notes: 'First thing in the morning', priority: 3, area: 'Health', est: '10-15', date: '2026-11-23', deadline: '', time: '', repeat: '', optional: false });
+  assert.equal(f.date, '2026-11-23');
+  assert.equal(f.deadline, null);
+  assert.equal(f.repeat, null);
+  assert.equal(f.estMin, 10);
+});
+
+test('a task you bring up again moves up for two weeks, without changing its priority', () => {
+  const today = '2026-11-22';
+  const base = E.normalizeTask({ title: 'Figure out ortho thing', priority: 3, createdAt: Date.parse('2026-11-22T12:00:00') }, today);
+  const again = E.normalizeTask({ ...base, again: { n: 1, at: Date.parse('2026-11-22T15:00:00') } }, today);
+  const idx = E.buildIndex([]);
+  const s0 = E.scoreTask(base, { today, idx }).score;
+  const s1 = E.scoreTask(again, { today, idx }).score;
+  assert.ok(s1 > s0, `${s1} > ${s0}`);
+  assert.equal(again.priority, 3);
+  assert.equal(E.againCount(again, today), 1);
+  assert.equal(E.againCount(again, '2026-12-10'), 0);
+});
+
+test('if the API ever refuses a schema, Claude answers without it instead of failing', async () => {
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    if (body.output_config.format) {
+      return { ok: false, status: 400, json: async () => ({ error: { message: "The compiled grammar is too large, which would cause performance issues. Simplify your tool schemas or reduce the number of strict tools." } }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: 'Here you go: {"reply":"ok","create":[]}' }], usage: {} }) };
+  };
+  const r = await AI.callClaude({ apiKey: 'sk-ant-test-0000', system: 'S', content: 'C', schema: AI.COMMAND_SCHEMA, fetchImpl });
+  assert.equal(r.data.reply, 'ok');
+  assert.equal(sent.length, 2);
+  assert.ok(!sent[1].output_config.format);
+  assert.match(sent[1].system, /JSON schema/);
+});
