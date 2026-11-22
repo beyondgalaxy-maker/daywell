@@ -58,7 +58,7 @@ export const storage = {
 };
 
 export function emptyState() {
-  return { v: 1, tasks: [], log: [], meta: { order: {}, plans: {}, dismiss: {}, timer: null, seeded: false }, shared: { ...DEFAULT_SHARED } };
+  return { v: 1, tasks: [], log: [], meta: { order: {}, plans: {}, sorted: {}, bdays: {}, dismiss: {}, timer: null, seeded: false }, shared: { ...DEFAULT_SHARED } };
 }
 
 export function repairState(s) {
@@ -70,6 +70,8 @@ export function repairState(s) {
   out.meta = {
     order: m.order && typeof m.order === 'object' ? m.order : {},
     plans: m.plans && typeof m.plans === 'object' ? m.plans : {},
+    sorted: m.sorted && typeof m.sorted === 'object' ? m.sorted : {},
+    bdays: m.bdays && typeof m.bdays === 'object' ? m.bdays : {},
     dismiss: m.dismiss && typeof m.dismiss === 'object' ? m.dismiss : {},
     timer: m.timer || null,
     seeded: !!m.seeded,
@@ -79,6 +81,26 @@ export function repairState(s) {
 }
 
 const clone = (x) => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
+
+// Sync keeps the newest edit of each item by its timestamp. If another device's clock runs ahead,
+// its edits carry future timestamps, and a later edit here would lose to them. So an edit always
+// gets a timestamp past the one it replaces, whatever this device's clock says.
+function stampsOf(s) {
+  const m = new Map();
+  for (const t of s.tasks) m.set(`t:${t.id}`, t.updatedAt || 0);
+  for (const e of s.log) m.set(`l:${e.id}`, e.updatedAt || 0);
+  return m;
+}
+function keepStampsMonotonic(s, stamps) {
+  for (const t of s.tasks) {
+    const was = stamps.get(`t:${t.id}`);
+    if (was != null && t.updatedAt !== was && !(t.updatedAt > was)) t.updatedAt = was + 1;
+  }
+  for (const e of s.log) {
+    const was = stamps.get(`l:${e.id}`);
+    if (was != null && e.updatedAt !== was && !(e.updatedAt > was)) e.updatedAt = was + 1;
+  }
+}
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 export class Store {
@@ -141,7 +163,7 @@ export class Store {
     this.emit('device');
   }
   setShared(patch) {
-    this.state.shared = { ...this.state.shared, ...patch, updatedAt: Date.now() };
+    this.state.shared = { ...this.state.shared, ...patch, updatedAt: Math.max(Date.now(), (this.state.shared.updatedAt || 0) + 1) };
     this.persist();
     this.emit('change');
   }
@@ -162,8 +184,10 @@ export class Store {
   // `meta` rides along with the undo step (for example the text the person typed), so the UI can
   // put things back where they came from when the step is undone.
   transact(label, fn, { undoable = true, meta = null } = {}) {
+    const stamps = stampsOf(this.state);
     const before = undoable ? clone({ tasks: this.state.tasks, log: this.state.log, meta: this.state.meta }) : null;
     const result = fn(this.state);
+    keepStampsMonotonic(this.state, stamps);
     if (undoable) {
       const diff = diffStates(before, this.state);
       if (diff.count) {
@@ -182,7 +206,9 @@ export class Store {
   undo() {
     const step = this.undoStack.pop();
     if (!step) return null;
+    const stamps = stampsOf(this.state);
     applyDiff(this.state, step.diff, 'before');
+    keepStampsMonotonic(this.state, stamps);
     this.redoStack.push(step);
     this.persist();
     this.emit('change');
@@ -192,7 +218,9 @@ export class Store {
   redo() {
     const step = this.redoStack.pop();
     if (!step) return null;
+    const stamps = stampsOf(this.state);
     applyDiff(this.state, step.diff, 'after');
+    keepStampsMonotonic(this.state, stamps);
     this.undoStack.push(step);
     this.persist();
     this.emit('change');
@@ -408,11 +436,12 @@ export function diffStates(before, after) {
     order: diffMap(before.meta.order, after.meta.order),
     plans: diffMap(before.meta.plans, after.meta.plans),
     sorted: diffMap(before.meta.sorted || {}, after.meta.sorted || {}),
+    bdays: diffMap(before.meta.bdays || {}, after.meta.bdays || {}),
     dismiss: diffMap(before.meta.dismiss, after.meta.dismiss),
     timer: same(before.meta.timer, after.meta.timer) ? null : { before: clone(before.meta.timer), after: clone(after.meta.timer) },
     seeded: before.meta.seeded !== after.meta.seeded ? { before: before.meta.seeded, after: after.meta.seeded } : null,
   };
-  d.count = d.tasks.length + d.log.length + d.order.length + d.plans.length + d.sorted.length + d.dismiss.length + (d.timer ? 1 : 0) + (d.seeded ? 1 : 0);
+  d.count = d.tasks.length + d.log.length + d.order.length + d.plans.length + d.sorted.length + d.bdays.length + d.dismiss.length + (d.timer ? 1 : 0) + (d.seeded ? 1 : 0);
   return d;
 }
 export function applyDiff(s, d, side) {
@@ -433,6 +462,7 @@ export function applyDiff(s, d, side) {
   for (const ch of d.order) putMap(s.meta.order, ch, { ids: [], at: now, cleared: true });
   for (const ch of d.plans) putMap(s.meta.plans, ch, { removed: true, at: now });
   for (const ch of d.sorted || []) putMap((s.meta.sorted ||= {}), ch, { by: {}, at: now });
+  for (const ch of d.bdays || []) putMap((s.meta.bdays ||= {}), ch, { ...(ch.before || ch.after || {}), gone: true, at: now });
   for (const ch of d.dismiss) s.meta.dismiss[ch.k] = clone(ch[side]) || [];
   if (d.timer) s.meta.timer = { ...(clone(d.timer[side]) || { id: null }), updatedAt: now };
   if (d.seeded) s.meta.seeded = d.seeded[side];

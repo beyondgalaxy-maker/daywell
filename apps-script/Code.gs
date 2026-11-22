@@ -4,11 +4,13 @@
 // Your other devices sign in with the sign-in key you choose in Daywell's Settings. Only a salted
 // hash of it is stored here, and wrong guesses are limited.
 // To connect a different Daywell later, choose resetKey in the toolbar and press Run once.
+// Backups: before your data is overwritten, the previous version is kept (at most one every two
+// hours, plus one a day for a month, within a fixed size budget) so a bad sync can always be undone.
 //
 // Setup: script.google.com → New project → paste this → Save →
 // Deploy → New deployment → Web app → Execute as: Me, Who has access: Anyone → Deploy.
 
-const VERSION = 3;
+const VERSION = 4;
 const CHUNK = 8000;
 
 function doGet(e) {
@@ -50,7 +52,14 @@ function handle_(p) {
     case 'load':
       return load_();
     case 'save':
-      return save_(p.data, p.baseRev);
+      return save_(p.data, p.baseRev, !!p.backup);
+    case 'backups':
+      return { ok: true, backups: backupList_() };
+    case 'backup':
+      return backupLoad_(p.id);
+    case 'backupNow':
+      backupCurrent_(PropertiesService.getScriptProperties(), true);
+      return { ok: true, backups: backupList_() };
     case 'addEvent':
       return addEvent_(p);
     case 'setPhrase':
@@ -97,6 +106,10 @@ function events_(p) {
         location: ev.getLocation() || '',
         free: free,
       };
+      try {
+        var type = String(ev.getEventType());
+        if (type && type !== 'DEFAULT') o.type = type;
+      } catch (e) {}
       if (o.allDay) {
         o.startDay = Utilities.formatDate(ev.getAllDayStartDate(), tz, 'yyyy-MM-dd');
         o.endDay = Utilities.formatDate(ev.getAllDayEndDate(), tz, 'yyyy-MM-dd');
@@ -122,14 +135,17 @@ function load_() {
   return { ok: true, data: JSON.parse(json), rev: rev };
 }
 
-function save_(data, baseRev) {
+function save_(data, baseRev, forceBackup) {
   var lock = LockService.getScriptLock();
   lock.waitLock(20000);
   try {
     var props = PropertiesService.getScriptProperties();
     var rev = Number(props.getProperty('dw_rev') || 0);
     if (baseRev !== null && baseRev !== undefined && baseRev !== '' && Number(baseRev) !== rev) return { ok: false, conflict: true, rev: rev };
+    var obj = typeof data === 'string' ? JSON.parse(data) : data;
+    if (!obj || !Array.isArray(obj.tasks)) return { ok: false, error: 'Refused to save data without a task list.' };
     var json = typeof data === 'string' ? data : JSON.stringify(data);
+    backupCurrent_(props, forceBackup);
     var gz = Utilities.gzip(Utilities.newBlob(json, 'application/json'));
     var b64 = Utilities.base64Encode(gz.getBytes());
     if (b64.length > 440000) return { ok: false, error: 'Your Daywell data is too large to sync. Export a backup and clear old history.' };
@@ -145,6 +161,106 @@ function save_(data, baseRev) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ---------- backups (kept in this script's user storage, separate from the live data) ---------- */
+
+var BK_BUDGET = 380000; // characters of compressed backups to keep
+var BK_GAP = 2 * 3600 * 1000; // at most one routine backup every two hours
+
+function backupIndex_(up) {
+  try {
+    var idx = JSON.parse(up.getProperty('bk_index') || '[]');
+    return Array.isArray(idx) ? idx : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function backupList_() {
+  return backupIndex_(PropertiesService.getUserProperties())
+    .map(function (b) {
+      return { id: b.id, at: b.at, rev: b.rev, size: b.size };
+    })
+    .reverse();
+}
+
+// Copies the data that's about to be replaced. Never blocks a save: if anything goes wrong here,
+// the save still happens.
+function backupCurrent_(props, force) {
+  try {
+    var n = Number(props.getProperty('dw_n') || 0);
+    if (!n) return;
+    var up = PropertiesService.getUserProperties();
+    var idx = backupIndex_(up);
+    var rev = Number(props.getProperty('dw_rev') || 0);
+    var now = Date.now();
+    var last = idx[idx.length - 1];
+    if (last && last.rev === rev) return;
+    if (!force && last && now - last.at < BK_GAP) return;
+    var b64 = '';
+    for (var i = 0; i < n; i++) b64 += props.getProperty('dw_' + i) || '';
+    if (!b64) return;
+    var id = String(now);
+    var parts = Math.ceil(b64.length / CHUNK);
+    var map = {};
+    for (var j = 0; j < parts; j++) map['bk_' + id + '_' + j] = b64.substr(j * CHUNK, CHUNK);
+    idx.push({ id: id, at: now, rev: rev, n: parts, size: b64.length });
+    var kept = thinBackups_(idx, now);
+    map.bk_index = JSON.stringify(kept);
+    up.setProperties(map);
+    dropBackups_(up, idx, kept);
+  } catch (err) {
+    console.warn('Backup skipped: ' + err);
+  }
+}
+
+// Newest 6, one per day for 30 days, then the size budget (always at least 3).
+function thinBackups_(idx, now) {
+  var sorted = idx.slice().sort(function (a, b) {
+    return b.at - a.at;
+  });
+  var keep = [];
+  var days = {};
+  for (var i = 0; i < sorted.length; i++) {
+    var b = sorted[i];
+    var day = new Date(b.at).toDateString();
+    if (keep.length < 6 || (now - b.at < 30 * 86400000 && !days[day])) {
+      keep.push(b);
+      days[day] = true;
+    }
+  }
+  var total = 0;
+  var out = [];
+  for (var k = 0; k < keep.length; k++) {
+    total += keep[k].size;
+    if (total > BK_BUDGET && out.length >= 3) break;
+    out.push(keep[k]);
+  }
+  return out.reverse();
+}
+
+function dropBackups_(up, before, kept) {
+  var still = {};
+  kept.forEach(function (b) {
+    still[b.id] = true;
+  });
+  before.forEach(function (b) {
+    if (still[b.id]) return;
+    for (var j = 0; j < b.n; j++) up.deleteProperty('bk_' + b.id + '_' + j);
+  });
+}
+
+function backupLoad_(id) {
+  var up = PropertiesService.getUserProperties();
+  var b = backupIndex_(up).filter(function (x) {
+    return x.id === String(id);
+  })[0];
+  if (!b) return { ok: false, error: 'That backup is no longer kept.' };
+  var b64 = '';
+  for (var j = 0; j < b.n; j++) b64 += up.getProperty('bk_' + b.id + '_' + j) || '';
+  var blob = Utilities.newBlob(Utilities.base64Decode(b64), 'application/x-gzip');
+  return { ok: true, at: b.at, rev: b.rev, data: JSON.parse(Utilities.ungzip(blob).getDataAsString()) };
 }
 
 function addEvent_(p) {

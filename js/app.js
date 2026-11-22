@@ -4,6 +4,7 @@ import * as AI from './ai.js';
 import { Store, applyChanges, markDone, moveTask, repairState } from './store.js';
 import { Google, HOME_SCRIPT, newSecret, scriptText, validScriptUrl } from './google.js';
 import { I } from './icons.js';
+import * as Backup from './backup.js';
 
 const store = new Store();
 const google = new Google(store);
@@ -189,8 +190,21 @@ function undoWithToast(step) {
 /* toast, confirm                                                      */
 /* ================================================================== */
 
+// While a dialog (Settings, a confirm) is open, everything behind it is inert, so the toast
+// shows inside that dialog instead, where its button can be pressed.
 function toast(msg, action) {
-  const el = $('#toast');
+  let el = $('#toast');
+  const dlg = document.querySelector('dialog[open]');
+  if (dlg) {
+    el.hidden = true;
+    el = dlg.querySelector(':scope > .toast.in-dialog');
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'toast in-dialog';
+      el.setAttribute('role', 'status');
+      dlg.appendChild(el);
+    }
+  }
   el.innerHTML = `<span>${esc(msg)}</span>${action ? `<button type="button">${esc(action.label)}</button>` : ''}`;
   el.hidden = false;
   if (action) el.querySelector('button').onclick = () => {
@@ -202,6 +216,7 @@ function toast(msg, action) {
 }
 function hideToast() {
   $('#toast').hidden = true;
+  for (const t of document.querySelectorAll('dialog .toast.in-dialog')) t.hidden = true;
 }
 function undoToast(msg, step) {
   toast(msg, step ? { label: 'Undo', run: () => undoWithToast(step) } : null);
@@ -284,7 +299,7 @@ async function runSort({ key, prompt, D = ui.day || store.today, save = false })
   ui.sorting = { key: key || 'new', text: instruction };
   render();
   try {
-    const { ids, content } = AI.sortContext({ items, today: D, now: new Date(), eventsOn: google.configured ? (d) => google.eventsOn(d) : null, instruction });
+    const { ids, content } = AI.sortContext({ items, today: D, now: new Date(), eventsOn: google.configured ? (d) => google.eventsOn(d) : null, instruction, state: ctx.s });
     const r = await AI.callClaude({ apiKey: store.device.apiKey, model: store.device.model, effort: store.device.effort, system: AI.SORT_SYSTEM, content, schema: AI.SORT_SCHEMA, maxTokens: 3000 });
     const order = [...new Set((r.data.order || []).map((x) => ids.long(x)).filter(Boolean))];
     if (!order.length) throw new Error('Claude didn’t return an order. Try again.');
@@ -381,21 +396,31 @@ function onSortMenu(act, el) {
 
 /* ---------- birthdays ---------- */
 
-// The day before someone's birthday on your calendar, a to-do pops up to wish them a happy
-// birthday (top of the list). It stays through the day itself and tidies itself away after.
-// Ids are stable, so two devices never add it twice, and one you delete stays deleted.
+// The day before someone's birthday, a to-do pops up to wish them a happy birthday (top of the
+// list). It stays through the day itself and tidies itself away after. Birthdays come from your
+// calendar however they're written (see E.birthdayName), from events Google marks as birthdays,
+// and from the ones you add in Settings or tell Claude about. Ids are stable, so two devices never
+// add it twice, and one you delete stays deleted.
+function calendarBirthdays(evs, today) {
+  const out = [];
+  for (const ev of evs) {
+    if (!ev.allDay || /holiday/i.test(ev.calName || '')) continue;
+    const who = E.birthdayName(ev.title, { sure: /birthday/i.test(ev.type || '') });
+    if (!who || E.isSelfName(who, { email: /@/.test(ev.calName || '') ? ev.calName : '', name: store.settings.name })) continue;
+    if (ev.startDay >= today) out.push({ who, D: ev.startDay });
+  }
+  return out;
+}
 function ensureBirthdays() {
-  if (!google.configured) return;
   const today = store.today;
   const want = new Map();
+  const wish = (who, D) => {
+    const id = `bday-${E.bdayKey(who)}-${D}`;
+    if (!want.has(id)) want.set(id, { id, who, D });
+  };
   for (const D of [today, E.addDays(today, 1)]) {
-    for (const ev of google.eventsOn(D)) {
-      if (!ev.allDay || ev.startDay !== D || /holiday/i.test(ev.calName || '')) continue;
-      const who = E.birthdayName(ev.title);
-      if (!who) continue;
-      const id = `bday-${who.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'someone'}-${D}`;
-      want.set(id, { id, who, D });
-    }
+    if (google.configured) for (const b of calendarBirthdays(google.eventsOn(D), today)) if (b.D === D) wish(b.who, D);
+    for (const b of E.birthdaysOn(D, store.state.meta.bdays)) wish(b.name, D);
   }
   const have = new Set(store.state.tasks.map((t) => t.id));
   const add = [...want.values()].filter((w) => !have.has(w.id));
@@ -971,6 +996,13 @@ function renderCalendar(ctx) {
 
 /* ---------- history ---------- */
 
+// What Daywell has noticed about how you work, the same notes Claude gets when it plans and sorts.
+function patternsHtml(ctx) {
+  const hp = E.habitProfile(ctx.s, ctx.today);
+  if (!hp) return `<section class="patterns"><h3 class="list-head">Your patterns</h3><p class="muted-note">After a few days of checking things off, Daywell notes when you usually get things done, and Claude takes it into account when it plans and sorts.</p></section>`;
+  return `<section class="patterns"><h3 class="list-head">Your patterns <span class="n">${esc(hp.basedOn)}</span></h3><ul>${hp.lines.map((l) => `<li>${esc(l)}</li>`).join('')}</ul><p class="muted-note">Claude uses these to keep plans and sorts realistic. They describe what you tend to do, not what you should do, so it won't copy the ones that work against you.</p></section>`;
+}
+
 function renderHistory(ctx) {
   const { today, s, idx } = ctx;
   const ws = E.startOfWeek(today, ctx.ws);
@@ -1034,7 +1066,7 @@ function renderHistory(ctx) {
   $('#viewHistory').innerHTML = `<div class="page"><div class="page-head"><h1>History</h1></div>
 <div class="h-stats"><div class="h-stat"><b>${weekDone}</b><span>done this week</span></div>${weekMins ? `<div class="h-stat"><b>${E.fmtMins(weekMins)}</b><span>timed this week</span></div>` : ''}${sched ? `<div class="h-stat"><b>${Math.round((hit / sched) * 100)}%</b><span>of routines kept this week</span></div>` : ''}<div class="h-stat"><b>${doneEntries.length}</b><span>done in total</span></div></div>
 <div class="heat" aria-label="Tasks done per day">${heat}</div>
-<div class="h-grid"><section>${rr ? `<h3 class="list-head">Routines, last 14 days</h3>${rr}` : '<h3 class="list-head">Routines</h3><p class="muted-note">Repeating tasks show their streaks here.</p>'}${trashHtml}</section>
+${patternsHtml(ctx)}<div class="h-grid"><section>${rr ? `<h3 class="list-head">Routines, last 14 days</h3>${rr}` : '<h3 class="list-head">Routines</h3><p class="muted-note">Repeating tasks show their streaks here.</p>'}${trashHtml}</section>
 <section><h3 class="list-head">Done</h3>${logHtml || '<p class="muted-note">Finished tasks show up here, day by day.</p>'}</section></div></div>`;
 }
 
@@ -1622,7 +1654,7 @@ async function askClaude(textArg) {
 function applyCommand(data, ids, text = '') {
   const today = store.today;
   const refs = new Map();
-  const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null, sorted: null };
+  const out = { reply: String(data.reply || ''), created: [], updated: [], completed: [], removed: [], questions: [], step: null, sorted: null, birthdays: [] };
   const order = [...new Set((data.order || []).map((x) => ids.long(x)).filter((id) => id && store.task(id)))];
   const sid = order.length > 1 ? E.uid('s') : null;
   const sortFrom = store.settings.sortBy || 'plan';
@@ -1672,6 +1704,14 @@ function applyCommand(data, ids, text = '') {
       t.updatedAt = Date.now();
       out.removed.push(id);
     }
+    for (const b of data.birthdays || []) {
+      const name = String(b.name || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+      const md = `${String(b.month).padStart(2, '0')}-${String(b.day).padStart(2, '0')}`;
+      if (!name || !E.isKey(`2024-${md}`)) continue;
+      const k = E.bdayKey(name);
+      (s.meta.bdays ||= {})[k] = { name, md, at: Math.max(Date.now(), (s.meta.bdays[k]?.at || 0) + 1) };
+      out.birthdays.push(name);
+    }
     if (sid) {
       // A sort request from the chat box: keep it as a one-off sort you can save from the panel.
       const day = (s.meta.sorted ||= {})[today] || { by: {} };
@@ -1682,6 +1722,7 @@ function applyCommand(data, ids, text = '') {
     }
   }, { meta: { input: text, mode: 'ask', ...(sid ? { sortFrom, sortTo: sid } : {}) } });
   if (out.sorted) store.setShared({ sorts: [...(store.settings.sorts || []).filter((x) => !x.temp), { id: out.sorted.id, name: shortSortName(text), prompt: text, temp: true }], sortBy: out.sorted.id });
+  if (out.birthdays.length) ensureBirthdays();
   if (store.undoStack.length > before) out.step = lastStep();
   for (const q of data.questions || []) {
     const taskId = refs.get(String(q.target).trim()) || ids.long(q.target);
@@ -1872,6 +1913,7 @@ function maybeAutoPlan() {
 /* ================================================================== */
 
 function openSettings(focus) {
+  ui.bkRemote = null;
   renderSettings();
   const d = $('#settings');
   if (!d.open) d.showModal();
@@ -1925,6 +1967,7 @@ function renderSettings() {
 <div class="st-row"><label for="st-gsurl">Web app URL</label><div class="row"><input id="st-gsurl" class="inp wide" placeholder="https://script.google.com/macros/s/…/exec" value="${esc(dv.gsUrlDraft || '')}"></div></div>
 <div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect">Connect</button><span id="st-gstatus" class="st-status"></span></div></div></details>
 `;
+  const keepToast = $('#settings').querySelector(':scope > .toast.in-dialog');
   $('#settings').innerHTML = `<div class="st-head"><h2>Settings</h2><button type="button" class="icon-btn" data-st="close" aria-label="Close settings">${I.x}</button></div><div class="st-body">
 <section class="st-sec" id="st-claude"><h3>Claude <span class="badge${dv.apiKey ? '' : ' off'}">${dv.apiKey ? 'Key saved' : 'Not set up'}</span></h3>
 <p>Claude turns lists into tasks, estimates times, asks quick questions, and plans your day. Your key stays in this browser and is only sent to Anthropic.</p>
@@ -1945,12 +1988,15 @@ function renderSettings() {
     .join('')}</div></div></section>
 ${coarse() && !g.configured ? phoneSection() : ''}<section class="st-sec" id="st-google"><h3>Google Calendar and sync <span class="badge${g.configured ? '' : ' off'}">${g.configured ? 'Connected' : 'Not connected'}</span></h3>${googleBody}</section>
 ${coarse() && !g.configured ? '' : phoneSection()}
-<section class="st-sec" id="st-data"><h3>Your data</h3><p>Everything lives in this browser${g.configured ? ' and your Google script' : ''}. Keep a backup now and then.</p>
-<div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn secondary" data-st="export">${I.download}Download backup</button><button type="button" class="btn secondary" data-st="import">${I.upload}Restore from backup</button><input type="file" id="st-file" accept="application/json,.json" hidden>${!store.state.meta.seeded || !store.state.tasks.some((t) => !t.purged && E.STARTER.some((s) => s.title === t.title)) ? `<button type="button" class="btn secondary" data-st="seed">Add my Daywell routines</button>` : ''}<button type="button" class="btn secondary" data-st="wipe" style="color:var(--danger)">${I.trash}Delete all tasks</button></div></section>
+${bdaySection()}
+<section class="st-sec" id="st-data"><h3>Backups</h3><p>Daywell backs itself up: on this device whenever something changes and right before a sync removes anything${g.configured ? ', and in your Google account every couple of hours' : ''}. Restoring brings back whatever is missing and never deletes what you have now.</p>
+<div class="bk-list" id="bk-list"><p class="muted-note">Looking for backups…</p></div>
+<div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn secondary" data-st="export">${I.download}Download backup</button><button type="button" class="btn secondary" data-st="import">${I.upload}Restore from a file</button><input type="file" id="st-file" accept="application/json,.json" hidden>${!store.state.meta.seeded || !store.state.tasks.some((t) => !t.purged && E.STARTER.some((s) => s.title === t.title)) ? `<button type="button" class="btn secondary" data-st="seed">Add my Daywell routines</button>` : ''}<button type="button" class="btn secondary" data-st="wipe" style="color:var(--danger)">${I.trash}Delete all tasks</button></div></section>
 <section class="st-sec"><h3>Appearance</h3><div class="st-row"><label>Theme</label><div class="seg" role="group">${['auto', 'light', 'dark'].map((v) => `<button type="button" data-st="theme" data-v="${v}" aria-pressed="${dv.theme === v}">${v === 'auto' ? 'Match system' : v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div></div></section>
 ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>`}
 <p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
+  if (keepToast) $('#settings').appendChild(keepToast);
   if (google.configured && ui.phrase == null && !ui.phraseLoading) {
     ui.phraseLoading = true;
     google
@@ -1962,6 +2008,7 @@ ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list
       .catch(() => {})
       .finally(() => (ui.phraseLoading = false));
   }
+  fillBackups();
 }
 
 async function onSettings(act, el) {
@@ -2089,8 +2136,22 @@ async function onSettings(act, el) {
   if (act === 'sign-out') {
     const ok = await confirmBox({ title: 'Sign out of this device?', body: 'This device forgets your tasks, calendar and keys. Everything stays safe in your Google script; type your key to come back.', ok: 'Sign out', cancel: 'Stay signed in', danger: true });
     if (!ok) return;
+    // Send anything not synced yet first; if that fails, keep this device's backups.
+    let synced = !google.configured || !dv.sync;
+    if (!synced) {
+      for (let i = 0; i < 40 && google.syncing; i++) await new Promise((r) => setTimeout(r, 250));
+      await google.sync();
+      synced = google.status === 'ok';
+      if (!synced) {
+        const go = await confirmBox({ title: 'Couldn’t sync your latest changes', body: `${google.error || 'Your Google script didn’t answer.'} If you sign out now, changes made on this device since the last sync stay only in this device’s backups.`, ok: 'Sign out anyway', cancel: 'Stay signed in', danger: true });
+        if (!go) return;
+      }
+    }
     store.setDevice({ gsUrl: '', gsSecret: '', apiKey: '', syncRev: null, lastSync: 0, localOnly: false });
+    ui.quietReplace = synced;
     store.replaceState({ ...store.state, tasks: [], log: [], meta: { order: {}, plans: {}, dismiss: {}, timer: null, seeded: true } }, 'change');
+    ui.quietReplace = false;
+    if (synced) Backup.clear().catch(() => {});
     google.clear();
     store.undoStack.length = 0;
     store.redoStack.length = 0;
@@ -2110,14 +2171,45 @@ async function onSettings(act, el) {
   }
   if (act === 'export') return exportBackup();
   if (act === 'import') return $('#st-file').click();
+  if (act === 'bk-restore') return restoreBackup(el.dataset.src, el.dataset.id);
+  if (act === 'bk-more') {
+    ui.bkAll = !ui.bkAll;
+    return fillBackups();
+  }
+  if (act === 'bday-add') {
+    const nameEl = $('#bd-name');
+    const dateEl = $('#bd-date');
+    const name = (nameEl?.value || '').replace(/\s+/g, ' ').trim().slice(0, 60);
+    const date = dateEl?.value || '';
+    if (!name) return nameEl?.focus();
+    if (!E.isKey(date)) return dateEl?.focus();
+    store.transact(`Added ${name}’s birthday`, (s) => {
+      const k = E.bdayKey(name);
+      (s.meta.bdays ||= {})[k] = { name, md: date.slice(5), at: Math.max(Date.now(), (s.meta.bdays[k]?.at || 0) + 1) };
+    });
+    ensureBirthdays();
+    undoToast(`Added ${name}’s birthday`, lastStep());
+    return renderSettings();
+  }
+  if (act === 'bday-del') {
+    const k = el.dataset.k;
+    const b = store.state.meta.bdays?.[k];
+    if (!b) return;
+    store.transact(`Removed ${b.name}’s birthday`, (s) => {
+      s.meta.bdays[k] = { ...s.meta.bdays[k], gone: true, at: Math.max(Date.now(), (s.meta.bdays[k]?.at || 0) + 1) };
+    });
+    undoToast(`Removed ${b.name}’s birthday`, lastStep());
+    return renderSettings();
+  }
   if (act === 'seed') {
     seed(E.STARTER.map((_, i) => i));
     $('#settings').close();
     return;
   }
   if (act === 'wipe') {
-    const ok = await confirmBox({ title: 'Delete all tasks?', body: 'This removes every task and its history on all your synced devices. Download a backup first if you might want them back.', ok: 'Delete everything', danger: true });
+    const ok = await confirmBox({ title: 'Delete all tasks?', body: 'This removes every task and its history on all your synced devices. A backup is kept, so you can bring them back from Settings → Backups.', ok: 'Delete everything', danger: true });
     if (!ok) return;
+    await Backup.save(store.state, 'before-delete-all', { force: true, keep: true });
     store.transact('Deleted everything', (s) => {
       const now = Date.now();
       s.tasks = s.tasks.map((t) => (t.purged ? t : E.purgedShell(t, now)));
@@ -2176,6 +2268,148 @@ function onSettingsChange(e) {
   if (el.id === 'st-file' && el.files?.[0]) importBackup(el.files[0]);
 }
 
+/* ---------- backups ---------- */
+
+const BACKUP_WHY = {
+  open: 'opened Daywell',
+  auto: 'automatic',
+  'before-sync': 'before a sync removed things',
+  'before-change': 'before this device’s tasks were replaced',
+  'before-restore': 'before a restore',
+  'before-delete-all': 'before deleting everything',
+};
+function fmtWhen(at) {
+  const d = new Date(at);
+  return `${E.fmtRelDay(E.keyFromDate(d), E.keyFromDate(new Date()))}, ${E.fmtClock(d)}`;
+}
+
+// Before anything replaces your data with something that has less in it (a sync bringing in
+// deletions from another device, a "use synced tasks" choice), keep a copy of what was here.
+// A sync that removes several things at once says so, with a way to bring them back.
+function watchForLoss() {
+  const replace = store.replaceState.bind(store);
+  store.replaceState = (next, reason = 'sync') => {
+    const prev = store.state;
+    if (!ui.quietReplace) {
+      const lost = E.lostBetween(prev, next);
+      if (lost.tasks.length || lost.log.length) {
+        const saved = Backup.save(prev, `before-${reason}`, { force: true });
+        if (reason === 'sync' && (lost.tasks.length >= 3 || lost.log.length >= 3)) {
+          saved.then((snap) => {
+            if (!snap) return;
+            const n = lost.tasks.length;
+            const msg = n ? `Sync removed ${n} task${n === 1 ? '' : 's'} deleted on another device` : `Sync removed ${lost.log.length} check-offs`;
+            toast(msg, { label: 'Bring back', run: () => restoreBackup('device', snap.id, { ask: false }) });
+          });
+        }
+      }
+    }
+    return replace(next, reason);
+  };
+}
+
+function autoBackup(reason = 'auto') {
+  ui.lastBackupAt = Date.now();
+  return Backup.save(store.state, reason);
+}
+
+async function fillBackups() {
+  if (!$('#bk-list')) return;
+  let local = null;
+  try {
+    local = await Backup.list();
+  } catch {
+    local = null;
+  }
+  let remote = ui.bkRemote?.list;
+  if (google.configured && (!ui.bkRemote || Date.now() - ui.bkRemote.at > 60000)) {
+    try {
+      remote = await google.backups();
+    } catch {
+      remote = undefined;
+    }
+    ui.bkRemote = { at: Date.now(), list: remote };
+  }
+  const box = $('#bk-list');
+  if (!box) return;
+  const row = (r) => `<li><span class="bk-when">${esc(fmtWhen(r.at))}</span><span class="bk-what">${esc(r.what)}</span><button type="button" class="chip-btn" data-st="bk-restore" data-src="${r.src}" data-id="${esc(r.id)}">Restore</button></li>`;
+  const dev = (local || []).map((b) => ({ src: 'device', id: b.id, at: b.at, what: `${b.counts?.tasks ?? '?'} tasks${b.reason && b.reason !== 'auto' && b.reason !== 'open' ? ` · ${BACKUP_WHY[b.reason] || b.reason}` : ''}` }));
+  const goo = (google.configured && remote ? remote : []).map((b) => ({ src: 'google', id: b.id, at: b.at, what: `version ${b.rev}` }));
+  const cap = (list, n) => (ui.bkAll ? list : list.slice(0, n));
+  let html = '';
+  if (local !== null) html += `<h4>On this device</h4>${dev.length ? `<ul>${cap(dev, 4).map(row).join('')}</ul>` : '<p class="muted-note">The first one is made in a moment.</p>'}`;
+  else html += '<p class="muted-note">This browser won’t keep backups on the device (private browsing?). Use Download backup now and then.</p>';
+  if (google.configured) {
+    if (remote === null) html += '<p class="muted-note">Your Google script is an older version without backups; update it to keep copies there too.</p>';
+    else if (remote) html += `<h4>In your Google account</h4>${goo.length ? `<ul>${cap(goo, 3).map(row).join('')}</ul>` : '<p class="muted-note">The first copy is kept on the next sync that changes something.</p>'}`;
+  }
+  if (dev.length > 4 || goo.length > 3) html += `<button type="button" class="link-btn" data-st="bk-more">${ui.bkAll ? 'Show fewer' : `Show all ${dev.length + goo.length}`}</button>`;
+  box.innerHTML = html;
+}
+
+async function restoreBackup(src, id, { ask = true } = {}) {
+  let snap = null;
+  let when = '';
+  try {
+    if (src === 'google') {
+      snap = await google.backupData(id);
+      when = fmtWhen(Number(id));
+    } else {
+      const b = await Backup.get(id);
+      if (b) {
+        snap = repairState(b.state);
+        when = fmtWhen(b.at);
+      }
+    }
+  } catch (e) {
+    return toast(`Couldn’t open that backup: ${e.message}`);
+  }
+  if (!snap) return toast('That backup is no longer kept.');
+  return bringBack(snap, when, { ask });
+}
+
+// Restores add back what's missing, never remove: newer edits stay, deleted things come back.
+async function bringBack(snap, when, { ask = true } = {}) {
+  const preview = E.recoverFrom(store.state, snap);
+  if (!preview.tasks && !preview.log) return toast('Everything in that backup is already here.');
+  const what = [preview.tasks && `${preview.tasks} task${preview.tasks === 1 ? '' : 's'}`, preview.log && `${preview.log} check-off${preview.log === 1 ? '' : 's'}`].filter(Boolean).join(' and ');
+  if (ask) {
+    const ok = await confirmBox({ title: `Bring back ${what}?`, body: `From the backup of ${when}: everything in it that isn’t here now, including things deleted since. Nothing you have now is removed or changed.`, ok: 'Bring back' });
+    if (!ok) return;
+  }
+  await Backup.save(store.state, 'before-restore', { force: true });
+  const { state: next } = E.recoverFrom(store.state, snap);
+  store.transact(`Brought back ${what}`, (s) => {
+    s.tasks = next.tasks;
+    s.log = next.log;
+    s.meta.bdays = next.meta.bdays || {};
+  });
+  undoToast(`Brought back ${what}`, lastStep());
+  if ($('#settings').open) renderSettings();
+}
+
+/* ---------- birthdays in Settings ---------- */
+
+function bdaySection() {
+  const today = store.today;
+  const md = (m) => new Date(2024, Number(m.slice(0, 2)) - 1, Number(m.slice(3))).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  const added = Object.entries(store.state.meta.bdays || {})
+    .filter(([, b]) => b && !b.gone && b.name && b.md)
+    .map(([k, b]) => ({ k, name: b.name, md: b.md, next: E.nextOccurrence(b.md, today) }))
+    .sort((a, b) => String(a.next).localeCompare(String(b.next)));
+  const seen = new Set();
+  const soon = [...(google.configured ? calendarBirthdays(google.windowEvents(31), today) : []), ...added.filter((a) => a.next && E.diffDays(today, a.next) <= 31).map((a) => ({ who: a.name, D: a.next }))]
+    .filter((b) => {
+      const k = `${E.bdayKey(b.who)}|${b.D}`;
+      return seen.has(k) ? false : seen.add(k);
+    })
+    .sort((a, b) => a.D.localeCompare(b.D))
+    .slice(0, 8);
+  return `<section class="st-sec" id="st-bdays"><h3>Birthdays</h3><p>The day before a birthday, “Wish them a happy birthday” shows up in Today. Daywell finds birthdays on your calendar however they’re written (“Sam’s birthday”, “Sam Florek bday”, “🎂 Sam”). Add any that aren’t there, or tell Claude “Sam’s birthday is March 3”.</p>
+${soon.length ? `<p class="bd-soon">Coming up: ${soon.map((b) => `${esc(b.who)} <span>${esc(E.fmtRelDay(b.D, today))}</span>`).join(', ')}</p>` : ''}${added.length ? `<ul class="bd-list">${added.map((a) => `<li><span>${esc(a.name)}</span><span class="bd-date">${esc(md(a.md))}</span><button type="button" class="icon-btn" data-st="bday-del" data-k="${esc(a.k)}" aria-label="Remove ${esc(a.name)}’s birthday">${I.x}</button></li>`).join('')}</ul>` : ''}
+<div class="st-row"><label for="bd-name">Add one</label><div class="row bd-add"><input id="bd-name" class="inp" placeholder="Name" autocomplete="off" maxlength="60"><input id="bd-date" class="inp" type="date" aria-label="Birthday"><button type="button" class="btn secondary" data-st="bday-add">Add</button></div></div></section>`;
+}
+
 function exportBackup() {
   const blob = new Blob([JSON.stringify({ app: 'daywell', version: 1, exportedAt: new Date().toISOString(), data: store.state }, null, 1)], { type: 'application/json' });
   const a = document.createElement('a');
@@ -2193,17 +2427,9 @@ async function importBackup(file) {
     const json = JSON.parse(await file.text());
     const data = json?.data && json.app === 'daywell' ? json.data : json;
     if (!data || !Array.isArray(data.tasks)) throw new Error('bad');
-    const n = data.tasks.filter((t) => !t.purged && !t.deletedAt).length;
-    const ok = await confirmBox({ title: 'Restore this backup?', body: `It has ${n} task${n === 1 ? '' : 's'}. They'll be merged with what you have now; nothing current is deleted.`, ok: 'Restore' });
-    if (!ok) return;
-    store.transact('Restored a backup', (s) => {
-      const merged = E.mergeStates(s, repairState(data));
-      s.tasks = merged.tasks;
-      s.log = merged.log;
-      s.meta = merged.meta;
-    });
-    toast(`Restored ${n} tasks`);
-  } catch {
+    await bringBack(repairState(data), json.exportedAt ? fmtWhen(Date.parse(json.exportedAt)) : 'that file');
+  } catch (e) {
+    if (e?.message !== 'bad' && !(e instanceof SyntaxError)) return toast(`Couldn’t restore: ${e.message}`);
     toast("That file isn't a Daywell backup.");
   } finally {
     const f = $('#st-file');
@@ -3083,8 +3309,10 @@ function bindEvents() {
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') store.flush();
-    else {
+    if (document.visibilityState === 'hidden') {
+      store.flush();
+      if (Date.now() - (ui.lastBackupAt || 0) > 60000) autoBackup();
+    } else {
       render();
       if (google.configured) {
         google.sync();
@@ -3116,6 +3344,9 @@ function boot() {
   staticChrome();
   bindEvents();
   store.onStep = (kind, step) => (kind === 'undo' ? stepUndone(step) : stepRedone(step));
+  watchForLoss();
+  Backup.persist();
+  autoBackup('open');
   const moveTo = store.moveTo.bind(store);
   store.moveTo = (id, day, ...rest) => {
     if (day) ui.fresh.set(id, Date.now());
@@ -3149,6 +3380,7 @@ function boot() {
     }
     if (!drag.s && !document.hidden) render();
     maybeAutoPlan();
+    if (Date.now() - (ui.lastBackupAt || 0) > 5 * 60000) autoBackup();
   }, 60000);
   setInterval(() => {
     const tm = store.state.meta.timer;

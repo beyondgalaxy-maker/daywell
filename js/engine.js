@@ -147,22 +147,84 @@ export function normRepeat(r) {
   return null;
 }
 
-// "Mom's birthday", "Sam Lee's bday", "Birthday: Ana", "Happy birthday Joe!" → the person's name.
-// Parties and dinners aren't birthdays to wish anyone for.
-export function birthdayName(title) {
-  const t = String(title || '').replace(/\s+/g, ' ').trim();
-  if (!/\b(birthday|bday|b-day)\b/i.test(t)) return null;
+// Calendar titles → the person whose birthday it is. Covers the ways people write it:
+// "Mom's birthday", "Sam Florek Birthday", "Sam Florek bday", "Sam's 21st b-day", "Birthday: Ana",
+// "Bday - Sam", "Happy birthday Joe!", "🎂 Sam Florek", "Sam turns 21", "Hasan's Birthday (Dana's brother)".
+// Parties, dinners and to-dos about a birthday ("Buy Sam a gift") aren't birthdays to wish anyone for.
+// `sure` is for events Google itself marks as birthdays, where the title may be just the name.
+const BDAY_WORD = "(?:birthday|bday|b-day|b'day|b’day)";
+const BDAY_HINT = new RegExp(`\\b${BDAY_WORD}(?![\\w-])|\\bturns\\s+\\d{1,3}\\b`, 'i');
+const BDAY_EMOJI = /[\u{1F382}\u{1F973}]/u; // 🎂 🥳
+const NOT_A_WISH = /\b(?:party|parties|dinner|lunch|brunch|drinks|celebration|bash|gifts?|presents?|card|shopping|planning|surprise)\b/i;
+const TODO_START = /^(?:wish|call|text|message|msg|buy|get|order|send|make|bake|write|sign|pick up|book|plan|remind)\b/i;
+export function birthdayName(title, { sure = false } = {}) {
+  const raw = String(title || '').replace(/\s+/g, ' ').trim();
+  if (!sure && !BDAY_HINT.test(raw) && !BDAY_EMOJI.test(raw)) return null;
+  if (NOT_A_WISH.test(raw) || TODO_START.test(raw)) return null;
+  const t = raw
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, ' ')
+    .replace(/\([^)]*\)|\[[^\]]*\]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   const tidy = (s) => {
     const n = String(s || '')
-      .replace(/[\s!.,:;~*\-–—]+$/u, '')
-      .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')
+      .replace(/^[\s:;,.~*!\-–—]+|[\s:;,.~*!\-–—]+$/gu, '')
+      .replace(/\s+happy$/i, '')
+      .replace(/['’]s?$/, '')
       .trim();
-    return n && n.length <= 60 && !/^(party|dinner|lunch|brunch|drinks|celebration|cake|gift|present|card)\b/i.test(n) ? n : null;
+    if (!n || n.length > 60 || n.split(' ').length > 6 || !/\p{L}/u.test(n)) return null;
+    return /^(?:my|your|his|her|their|our|the|a|an|happy|birthday|bday|b-day)$/i.test(n) ? null : n;
   };
-  let m = t.match(/^(.+?)['’]s?\s+(?:\d+\w{0,2}\s+)?(?:birthday|bday|b-day)\b/i);
-  if (m) return tidy(m[1].replace(/['’]$/, ''));
-  m = t.match(/^(?:happy\s+)?(?:birthday|bday|b-day)\s*(?:[:\-–—]\s*|\s(?:for|of|to)\s+|\s+)(.+)$/i);
-  if (m) return tidy(m[1]);
+  const tries = [
+    new RegExp(`^(.+?)['’]s?\\s+(?:\\d{1,3}(?:st|nd|rd|th)?\\s+)?${BDAY_WORD}(?![\\w-])`, 'i'),
+    new RegExp(`^(?:happy\\s+)?${BDAY_WORD}(?![\\w-])\\s*(?:[:\\-–—]\\s*|\\s(?:for|of|to)\\s+|\\s+)(.+)$`, 'i'),
+    new RegExp(`^(.+?)\\s+(?:\\d{1,3}(?:st|nd|rd|th)?\\s+)?${BDAY_WORD}(?![\\w-])`, 'i'),
+    /^(.+?)\s+turns\s+\d{1,3}\b/i,
+  ];
+  for (const re of tries) {
+    const m = t.match(re);
+    if (m) return tidy(m[1]);
+  }
+  // Just a name with a cake (or an event Google marks as a birthday): "🎂 Sam Florek".
+  if (sure || BDAY_EMOJI.test(raw)) return tidy(t.replace(new RegExp(`(?:happy\\s+)?${BDAY_WORD}(?![\\w-])`, 'ig'), ' ').replace(/\s+/g, ' '));
+  return null;
+}
+
+// Your own birthday is on your calendar too; nobody needs a reminder to wish themselves.
+// Matched against the calendar's account (justint… → Justin T…) and the name in Settings.
+export function isSelfName(who, { email = '', name = '' } = {}) {
+  const parts = String(who || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[^a-z\s]/g, '')
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return false;
+  const me = String(name || '').toLowerCase().trim();
+  if (me && me.includes(' ') && me === parts.join(' ')) return true;
+  const local = String(email || '').split('@')[0].toLowerCase().replace(/[^a-z]/g, '');
+  if (!local || parts.length < 2) return false;
+  const first = parts[0];
+  const last = parts[parts.length - 1];
+  if (me && me.split(/\s+/)[0] !== first) return false;
+  return [first + last[0], first + last, first[0] + last, last + first].includes(local);
+}
+
+// Birthdays you add in Daywell itself (for ones that aren't on your Google calendar).
+export const bdayKey = (name) => String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'someone';
+export function birthdaysOn(D, bdays = {}) {
+  const md = D.slice(5);
+  const y = Number(D.slice(0, 4));
+  const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+  return Object.values(bdays || {}).filter((b) => b && !b.gone && b.name && (b.md === md || (!leap && b.md === '02-29' && md === '02-28')));
+}
+// The next date (today or later) a month-day comes around.
+export function nextOccurrence(md, today) {
+  for (const y of [Number(today.slice(0, 4)), Number(today.slice(0, 4)) + 1]) {
+    let D = `${y}-${md}`;
+    if (!isKey(D)) D = `${y}-02-28`;
+    if (D >= today) return D;
+  }
   return null;
 }
 
@@ -660,6 +722,180 @@ export function typicalMinutes(idx, id) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Habits                                                              */
+/* ------------------------------------------------------------------ */
+
+// What the person tends to do, read from recent check-offs: when things get done, how much an
+// active day holds, when each routine usually happens, what tends to come first, what gets skipped.
+// It describes; it doesn't judge. Claude uses it to make plans realistic, not to copy every habit.
+export function fmtMinuteOfDay(m) {
+  const mm = (((Math.round(m / 15) * 15) % 1440) + 1440) % 1440;
+  const h = Math.floor(mm / 60);
+  const mi = mm % 60;
+  return `${h % 12 || 12}${mi ? `:${String(mi).padStart(2, '0')}` : ''}${h < 12 ? 'am' : 'pm'}`;
+}
+const median = (xs) => {
+  const s = [...xs].sort((a, b) => a - b);
+  if (!s.length) return null;
+  const k = Math.floor(s.length / 2);
+  return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2;
+};
+const HABIT_SLOTS = [
+  ['in the early morning (5–9am)', 300, 540],
+  ['in the late morning (9am–noon)', 540, 720],
+  ['in the afternoon (noon–5pm)', 720, 1020],
+  ['in the evening (5–9pm)', 1020, 1260],
+  ['at night (9pm–midnight)', 1260, 1440],
+  ['after midnight', 1440, 1740],
+];
+export function habitProfile(state, today, { days = 28 } = {}) {
+  const from = addDays(today, -(days - 1));
+  const tasks = new Map((state.tasks || []).map((t) => [t.id, t]));
+  const recent = (state.log || []).filter((e) => !e.deleted && e.day >= from && e.day <= today);
+  const done = recent.filter((e) => !e.skip && e.at && !isNaN(Date.parse(e.at)));
+  const active = [...new Set(done.map((e) => e.day))].sort();
+  if (done.length < 6 || active.length < 3) return null;
+  const titleOf = (e) => tasks.get(e.task)?.title || e.title || '';
+  // Minutes after the start of the entry's day; a 1am check-off that counts for yesterday is 25:00.
+  const clock = (e) => {
+    const d = new Date(e.at);
+    const m = d.getHours() * 60 + d.getMinutes();
+    const ahead = Math.min(1, Math.max(0, diffDays(e.day, keyFromDate(d))));
+    return ahead ? m + 1440 : m < 300 ? m + 1440 : m;
+  };
+  const lines = [];
+  const usual = {};
+
+  const slotCount = HABIT_SLOTS.map(() => 0);
+  for (const e of done) {
+    const m = clock(e);
+    const i = HABIT_SLOTS.findIndex(([, a, b]) => m >= a && m < b);
+    if (i > -1) slotCount[i]++;
+  }
+  const shares = slotCount.map((n, i) => ({ name: HABIT_SLOTS[i][0], pct: Math.round((n / done.length) * 100) })).sort((a, b) => b.pct - a.pct);
+  const top = shares.filter((s) => s.pct >= 20).slice(0, 2);
+  if (top.length && top[0].pct >= 60) lines.push(`Gets most things done ${top[0].name} (${top[0].pct}% of check-offs).`);
+  else if (top.length) lines.push(`Mostly checks things off ${top.map((s) => `${s.name} (${s.pct}%)`).join(' and ')}.`);
+  const late = shares.find((s) => s.name === 'after midnight');
+  if (late && late.pct >= 20 && !top.some((s) => s.name === 'after midnight')) lines.push(`About ${late.pct}% of check-offs happen after midnight.`);
+
+  const perDay = new Map();
+  for (const e of done) {
+    const d = perDay.get(e.day) || { n: 0, mins: 0, timed: 0 };
+    d.n++;
+    const m = e.mins || e.est || 0;
+    if (m) {
+      d.mins += m;
+      d.timed++;
+    }
+    perDay.set(e.day, d);
+  }
+  const span = Math.min(days, diffDays(active[0], today) + 1);
+  const n = Math.round(median([...perDay.values()].map((d) => d.n)));
+  const timedShare = done.filter((e) => e.mins || e.est).length / done.length;
+  const mins = timedShare >= 0.5 ? median([...perDay.values()].map((d) => d.mins)) : null;
+  lines.push(`Checked things off on ${active.length} of the last ${span} days; a typical active day had about ${n} done${mins >= 20 ? ` (~${fmtMins(Math.round(mins / 5) * 5)} of work)` : ''}.`);
+
+  if (span >= 14) {
+    const byWd = Array(7).fill(0);
+    const seen = Array(7).fill(0);
+    for (let k = 0; k < span; k++) seen[localDate(addDays(today, -k)).getDay()]++;
+    for (const e of done) byWd[localDate(e.day).getDay()]++;
+    const avg = byWd.map((c, i) => (seen[i] ? c / seen[i] : 0));
+    const mean = avg.reduce((a, b) => a + b, 0) / 7;
+    const order = avg.map((v, i) => ({ v, i })).sort((a, b) => b.v - a.v);
+    const busy = order.filter((x) => x.v >= mean * 1.35).slice(0, 2).map((x) => `${WEEKDAYS[x.i]}s`);
+    const light = order.filter((x) => x.v <= mean * 0.6).slice(-2).map((x) => `${WEEKDAYS[x.i]}s`);
+    if (busy.length || light.length) lines.push([busy.length && `Gets the most done on ${busy.join(' and ')}`, light.length && `${busy.length ? 'least' : 'Gets the least done'} on ${light.join(' and ')}`].filter(Boolean).join('; ') + '.');
+  }
+
+  const byTask = new Map();
+  for (const e of done) {
+    const t = tasks.get(e.task);
+    if (!t || !t.repeat) continue;
+    (byTask.get(e.task) || byTask.set(e.task, []).get(e.task)).push(clock(e));
+  }
+  const routines = [...byTask.entries()]
+    .filter(([, ms]) => ms.length >= 3)
+    .map(([id, ms]) => ({ id, m: median(ms), title: tasks.get(id).title, n: ms.length }))
+    .sort((a, b) => b.n - a.n)
+    .slice(0, 8)
+    .sort((a, b) => a.m - b.m);
+  for (const r of routines) usual[r.id] = Math.round(r.m);
+  if (routines.length) lines.push(`Routines usually get done around: ${routines.map((r) => `“${r.title}” ${fmtMinuteOfDay(r.m)}`).join(', ')}.`);
+
+  const firsts = new Map();
+  let multi = 0;
+  for (const D of active) {
+    const es = done.filter((e) => e.day === D);
+    if (es.length < 2) continue;
+    multi++;
+    const first = es.reduce((a, b) => (clock(a) <= clock(b) ? a : b));
+    const title = titleOf(first);
+    if (title) firsts.set(title, (firsts.get(title) || 0) + 1);
+  }
+  const opener = [...firsts.entries()].sort((a, b) => b[1] - a[1])[0];
+  if (opener && opener[1] >= 3 && opener[1] / multi >= 0.4) lines.push(`Often starts the day with “${opener[0]}” (${opener[1]} of ${multi} days).`);
+
+  const skips = new Map();
+  for (const e of recent) if (e.skip && tasks.get(e.task) && !tasks.get(e.task).deletedAt) skips.set(e.task, (skips.get(e.task) || 0) + 1);
+  const skipped = [...skips.entries()].filter(([, c]) => c >= 2).sort((a, b) => b[1] - a[1]).slice(0, 3);
+  if (skipped.length) lines.push(`Skips some routines often lately: ${skipped.map(([id, c]) => `“${tasks.get(id).title}” (${c}×)`).join(', ')}.`);
+
+  return { basedOn: `${done.length} check-offs over the last ${span} days`, lines, usual };
+}
+
+/* ------------------------------------------------------------------ */
+/* Backups                                                             */
+/* ------------------------------------------------------------------ */
+
+// What `after` no longer has that `before` had: live tasks that are gone or deleted, and
+// check-offs that disappeared. Used to back up first whenever a sync or restore removes things.
+export function lostBetween(before, after) {
+  const live = (t) => !!t && !t.deletedAt && !t.purged;
+  const a = new Map((after?.tasks || []).map((t) => [t.id, t]));
+  const tasks = (before?.tasks || []).filter((t) => live(t) && !live(a.get(t.id))).map((t) => t.id);
+  const la = new Map((after?.log || []).map((e) => [e.id, e]));
+  const log = (before?.log || []).filter((e) => !e.deleted && (!la.get(e.id) || la.get(e.id).deleted)).map((e) => e.id);
+  return { tasks, log };
+}
+
+// Bring back from a backup everything that's missing now (tasks, check-offs, birthdays), without
+// touching anything that's still here: newer edits win, nothing current is removed. Restored items
+// get a timestamp newer than the deletion they undo (even if another device's clock runs ahead),
+// so the restore also wins on your other devices.
+export function recoverFrom(current, snap, now = Date.now()) {
+  const next = JSON.parse(JSON.stringify(current));
+  const live = (t) => !!t && !t.deletedAt && !t.purged;
+  const tasks = new Map(next.tasks.map((t) => [t.id, t]));
+  let nTasks = 0;
+  let nLog = 0;
+  for (const t of snap?.tasks || []) {
+    if (!t || typeof t.id !== 'string' || !live(t) || live(tasks.get(t.id))) continue;
+    const cur = tasks.get(t.id);
+    const back = { ...JSON.parse(JSON.stringify(t)), deletedAt: null, purged: false, updatedAt: Math.max(now, (cur?.updatedAt || 0) + 1, (t.updatedAt || 0) + 1) };
+    if (cur) {
+      for (const k of Object.keys(cur)) delete cur[k];
+      Object.assign(cur, back);
+    } else next.tasks.push(back);
+    nTasks++;
+  }
+  const log = new Map(next.log.map((e) => [e.id, e]));
+  for (const e of snap?.log || []) {
+    if (!e || !e.id || e.deleted || (log.get(e.id) && !log.get(e.id).deleted)) continue;
+    const back = { ...JSON.parse(JSON.stringify(e)), deleted: false, updatedAt: Math.max(now, (log.get(e.id)?.updatedAt || 0) + 1, (e.updatedAt || 0) + 1) };
+    if (log.get(e.id)) Object.assign(log.get(e.id), back);
+    else next.log.push(back);
+    nLog++;
+  }
+  const bd = (next.meta.bdays ||= {});
+  for (const [k, b] of Object.entries(snap?.meta?.bdays || {})) {
+    if (b && !b.gone && (!bd[k] || bd[k].gone)) bd[k] = { ...b, at: Math.max(now, (bd[k]?.at || 0) + 1) };
+  }
+  return { state: next, tasks: nTasks, log: nLog };
+}
+
+/* ------------------------------------------------------------------ */
 /* History                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -762,6 +998,7 @@ export function mergeStates(local, remote) {
       order: mergeKeyed(lm.order, rm.order),
       plans: mergeKeyed(lm.plans, rm.plans),
       sorted: mergeKeyed(lm.sorted, rm.sorted),
+      bdays: mergeKeyed(lm.bdays, rm.bdays),
       dismiss,
       timer,
       seeded: !!(lm.seeded || rm.seeded),

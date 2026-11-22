@@ -278,7 +278,9 @@ export class Google {
           this.store.setDevice({ syncRev: remote.rev, lastSync: Date.now() });
           break;
         }
-        const r = await this.save(this.store.state, remote.rev);
+        // If this upload removes things the server has, have the script keep a copy first.
+        const lost = remoteState ? E.lostBetween(remoteState, this.store.state) : { tasks: [], log: [] };
+        const r = await this.save(this.store.state, remote.rev, lost.tasks.length >= 3 || lost.log.length > 0);
         if (r.conflict) continue;
         this.store.setDevice({ syncRev: r.rev, lastSync: Date.now() });
         break;
@@ -301,17 +303,41 @@ export class Google {
     const { gsUrl, gsSecret } = this.store.device;
     await fetch(gsUrl, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ secret: gsSecret, action, ...params }) });
   }
-  async save(state, baseRev) {
+  async save(state, baseRev, backup = false) {
+    const extra = backup ? { backup: 1 } : {};
     try {
-      return await this.request('save', { data: state, baseRev }, true);
+      return await this.request('save', { data: state, baseRev, ...extra }, true);
     } catch (e) {
       if (!/reach/i.test(e.message)) throw e;
-      await this.postBlind('save', { data: state, baseRev });
+      await this.postBlind('save', { data: state, baseRev, ...extra });
       const back = await this.request('load');
       if (back.rev === Number(baseRev) + 1 && back.data && E.fingerprint(repairState(back.data)) === E.fingerprint(state)) return { ok: true, rev: back.rev };
       return { ok: false, conflict: true, rev: back.rev };
     }
   }
+  /* ---------- backups kept by your Google script ---------- */
+  // null when the script is an older version without backups.
+  async backups() {
+    try {
+      return (await this.request('backups')).backups || [];
+    } catch (e) {
+      if (/unknown action/i.test(e.message)) return null;
+      throw e;
+    }
+  }
+  async backupData(id) {
+    const r = await this.request('backup', { id });
+    return r.data ? repairState(r.data) : null;
+  }
+  async backupNow() {
+    try {
+      return (await this.request('backupNow')).backups || [];
+    } catch (e) {
+      if (/unknown action/i.test(e.message)) return null;
+      throw e;
+    }
+  }
+
   async addEvent({ title, start, end, description }) {
     try {
       return await this.request('addEvent', { title, start, end, description }, true);

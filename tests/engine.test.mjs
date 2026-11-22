@@ -230,3 +230,104 @@ test('normalizeTask repairs input', () => {
   assert.equal(t.start, '2026-11-18');
   assert.equal(t.date, null);
 });
+
+/* ---------- birthdays, habits, backups ---------- */
+
+test('birthdayName reads the ways people write birthdays', () => {
+  const cases = {
+    "Sam Florek Birthday": 'Sam Florek',
+    'Sam Florek bday': 'Sam Florek',
+    "Sam Florek's Birthday": 'Sam Florek',
+    'Sofi’s birthday 🎂': 'Sofi',
+    "Hasan's Birthday (Dana Brother)": 'Hasan',
+    'Happy Birthday Sam!': 'Sam',
+    'Birthday: Ana': 'Ana',
+    'Bday - Sam Florek': 'Sam Florek',
+    '🎂 Sam Florek': 'Sam Florek',
+    'Sam turns 21 🎉': 'Sam',
+    "Mom's 50th birthday": 'Mom',
+    "Sam Florek b'day": 'Sam Florek',
+    'Birthday party': null,
+    "Sam's birthday dinner": null,
+    'Wish Sam a happy birthday': null,
+    'Buy gift for Sam bday': null,
+    'Happy Birthday!': null,
+    'My birthday': null,
+    'Birthdays': null,
+    'Chem exam': null,
+  };
+  for (const [title, want] of Object.entries(cases)) assert.equal(E.birthdayName(title), want, title);
+  assert.equal(E.birthdayName('Sam Florek', { sure: true }), 'Sam Florek');
+});
+
+test('your own birthday is recognized and skipped', () => {
+  assert.equal(E.isSelfName('Justin Tang', { email: 'justint0003@gmail.com', name: 'Justin' }), true);
+  assert.equal(E.isSelfName('Justin Lee', { email: 'justint0003@gmail.com', name: 'Justin' }), false);
+  assert.equal(E.isSelfName('Sam Florek', { email: 'justint0003@gmail.com' }), false);
+});
+
+test('birthdays you add come around every year, leap days included', () => {
+  const b = { 'sam-florek': { name: 'Sam Florek', md: '12-02', at: 1 }, leap: { name: 'Leap', md: '02-29', at: 1 }, old: { name: 'Gone', md: '12-02', gone: true, at: 2 } };
+  assert.deepEqual(E.birthdaysOn('2026-12-02', b).map((x) => x.name), ['Sam Florek']);
+  assert.equal(E.birthdaysOn('2027-02-28', b).length, 1);
+  assert.equal(E.birthdaysOn('2028-02-28', b).length, 0);
+  assert.equal(E.nextOccurrence('11-21', '2026-11-21'), '2026-11-21');
+  assert.equal(E.nextOccurrence('01-05', '2026-11-21'), '2027-01-05');
+  const merged = E.mergeStates({ tasks: [], log: [], meta: { bdays: { a: { name: 'A', md: '01-01', at: 5 } } } }, { tasks: [], log: [], meta: { bdays: { a: { name: 'A', md: '01-01', gone: true, at: 9 }, b: { name: 'B', md: '02-02', at: 1 } } } });
+  assert.equal(merged.meta.bdays.a.gone, true);
+  assert.equal(merged.meta.bdays.b.name, 'B');
+});
+
+test('habitProfile describes when things get done', () => {
+  const today = '2026-11-21';
+  const tasks = [
+    { id: 'step', title: 'Step', repeat: { kind: 'daily' } },
+    { id: 'bio', title: 'Biology review' },
+  ];
+  const log = [];
+  for (let k = 0; k < 6; k++) {
+    const day = E.addDays(today, -k);
+    const at = (h, m) => new Date(`${day}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00`).toISOString();
+    log.push({ id: `s${k}`, task: 'step', day, at: at(22, 15), est: 120 });
+    log.push({ id: `b${k}`, task: 'bio', day, at: at(21, 40), est: 60 });
+  }
+  const p = E.habitProfile({ tasks, log }, today);
+  assert.ok(p);
+  assert.match(p.lines.join(' '), /night \(9pm–midnight\)/);
+  assert.match(p.lines.join(' '), /“Step” 10:15pm/);
+  assert.equal(p.usual.step, 22 * 60 + 15);
+  assert.equal(E.habitProfile({ tasks, log: log.slice(0, 3) }, today), null);
+});
+
+test('lostBetween and recoverFrom bring back only what is missing', () => {
+  const before = {
+    tasks: [
+      { id: 'a', title: 'Keep me', updatedAt: 1 },
+      { id: 'b', title: 'Deleted later', updatedAt: 1 },
+      { id: 'c', title: 'Gone from list', updatedAt: 1 },
+    ],
+    log: [{ id: 'l1', task: 'a', day: '2026-11-20', updatedAt: 1 }],
+    meta: { bdays: { sam: { name: 'Sam', md: '12-02', at: 1 } } },
+  };
+  const now = {
+    tasks: [
+      { id: 'a', title: 'Keep me (edited)', updatedAt: 5 },
+      { id: 'b', title: 'Deleted later', deletedAt: 4, updatedAt: 4 },
+      { id: 'd', title: 'New since', updatedAt: 6 },
+    ],
+    log: [{ id: 'l1', task: 'a', day: '2026-11-20', deleted: true, updatedAt: 4 }],
+    meta: { bdays: {} },
+  };
+  assert.deepEqual(E.lostBetween(before, now), { tasks: ['b', 'c'], log: ['l1'] });
+  const r = E.recoverFrom(now, before, 100);
+  assert.equal(r.tasks, 2);
+  assert.equal(r.log, 1);
+  const byId = Object.fromEntries(r.state.tasks.map((t) => [t.id, t]));
+  assert.equal(byId.a.title, 'Keep me (edited)');
+  assert.equal(byId.b.deletedAt, null);
+  assert.equal(byId.b.updatedAt, 100);
+  assert.ok(byId.c && byId.d);
+  assert.equal(r.state.log[0].deleted, false);
+  assert.equal(r.state.meta.bdays.sam.name, 'Sam');
+  assert.deepEqual(E.lostBetween(before, r.state), { tasks: [], log: [] });
+});
