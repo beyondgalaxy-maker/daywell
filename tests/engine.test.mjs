@@ -293,7 +293,7 @@ test('habitProfile describes when things get done', () => {
   }
   const p = E.habitProfile({ tasks, log }, today);
   assert.ok(p);
-  assert.match(p.lines.join(' '), /night \(9pm–midnight\)/);
+  assert.match(p.lines.join(' '), /at night \(9pm–midnight, 100%/);
   assert.match(p.lines.join(' '), /“Step” 10:15pm/);
   assert.equal(p.usual.step, 22 * 60 + 15);
   assert.equal(E.habitProfile({ tasks, log: log.slice(0, 3) }, today), null);

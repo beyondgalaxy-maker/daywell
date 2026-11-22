@@ -741,12 +741,12 @@ const median = (xs) => {
   return s.length % 2 ? s[k] : (s[k - 1] + s[k]) / 2;
 };
 const HABIT_SLOTS = [
-  ['in the early morning (5–9am)', 300, 540],
-  ['in the late morning (9am–noon)', 540, 720],
-  ['in the afternoon (noon–5pm)', 720, 1020],
-  ['in the evening (5–9pm)', 1020, 1260],
-  ['at night (9pm–midnight)', 1260, 1440],
-  ['after midnight', 1440, 1740],
+  ['in the early morning', '5–9am', 300, 540],
+  ['in the late morning', '9am–noon', 540, 720],
+  ['in the afternoon', 'noon–5pm', 720, 1020],
+  ['in the evening', '5–9pm', 1020, 1260],
+  ['at night', '9pm–midnight', 1260, 1440],
+  ['after midnight', '', 1440, 1740],
 ];
 export function habitProfile(state, today, { days = 28 } = {}) {
   const from = addDays(today, -(days - 1));
@@ -769,13 +769,14 @@ export function habitProfile(state, today, { days = 28 } = {}) {
   const slotCount = HABIT_SLOTS.map(() => 0);
   for (const e of done) {
     const m = clock(e);
-    const i = HABIT_SLOTS.findIndex(([, a, b]) => m >= a && m < b);
+    const i = HABIT_SLOTS.findIndex(([, , a, b]) => m >= a && m < b);
     if (i > -1) slotCount[i]++;
   }
-  const shares = slotCount.map((n, i) => ({ name: HABIT_SLOTS[i][0], pct: Math.round((n / done.length) * 100) })).sort((a, b) => b.pct - a.pct);
+  const shares = slotCount.map((n, i) => ({ name: HABIT_SLOTS[i][0], range: HABIT_SLOTS[i][1], pct: Math.round((n / done.length) * 100) })).sort((a, b) => b.pct - a.pct);
   const top = shares.filter((s) => s.pct >= 20).slice(0, 2);
-  if (top.length && top[0].pct >= 60) lines.push(`Gets most things done ${top[0].name} (${top[0].pct}% of check-offs).`);
-  else if (top.length) lines.push(`Mostly checks things off ${top.map((s) => `${s.name} (${s.pct}%)`).join(' and ')}.`);
+  const slot = (s, what = '') => `${s.name} (${s.range ? `${s.range}, ` : ''}${s.pct}%${what})`;
+  if (top.length && top[0].pct >= 60) lines.push(`Gets most things done ${slot(top[0], ' of check-offs')}.`);
+  else if (top.length) lines.push(`Mostly checks things off ${top.map((s) => slot(s)).join(' and ')}.`);
   const late = shares.find((s) => s.name === 'after midnight');
   if (late && late.pct >= 20 && !top.some((s) => s.name === 'after midnight')) lines.push(`About ${late.pct}% of check-offs happen after midnight.`);
 
@@ -794,7 +795,7 @@ export function habitProfile(state, today, { days = 28 } = {}) {
   const n = Math.round(median([...perDay.values()].map((d) => d.n)));
   const timedShare = done.filter((e) => e.mins || e.est).length / done.length;
   const mins = timedShare >= 0.5 ? median([...perDay.values()].map((d) => d.mins)) : null;
-  lines.push(`Checked things off on ${active.length} of the last ${span} days; a typical active day had about ${n} done${mins >= 20 ? ` (~${fmtMins(Math.round(mins / 5) * 5)} of work)` : ''}.`);
+  lines.push(`${active.length === span ? `Checked things off every day for the last ${span} days` : `Checked things off on ${active.length} of the last ${span} days`}; a typical active day had about ${n} done${mins >= 20 ? ` (~${fmtMins(Math.round(mins / 5) * 5)} of work)` : ''}.`);
 
   if (span >= 14) {
     const byWd = Array(7).fill(0);

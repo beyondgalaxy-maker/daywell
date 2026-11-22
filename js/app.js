@@ -2334,7 +2334,7 @@ async function fillBackups() {
   if (!box) return;
   const row = (r) => `<li><span class="bk-when">${esc(fmtWhen(r.at))}</span><span class="bk-what">${esc(r.what)}</span><button type="button" class="chip-btn" data-st="bk-restore" data-src="${r.src}" data-id="${esc(r.id)}">Restore</button></li>`;
   const dev = (local || []).map((b) => ({ src: 'device', id: b.id, at: b.at, what: `${b.counts?.tasks ?? '?'} tasks${b.reason && b.reason !== 'auto' && b.reason !== 'open' ? ` · ${BACKUP_WHY[b.reason] || b.reason}` : ''}` }));
-  const goo = (google.configured && remote ? remote : []).map((b) => ({ src: 'google', id: b.id, at: b.at, what: `version ${b.rev}` }));
+  const goo = (google.configured && remote ? remote : []).map((b) => ({ src: 'google', id: b.id, at: b.at, what: '' }));
   const cap = (list, n) => (ui.bkAll ? list : list.slice(0, n));
   let html = '';
   if (local !== null) html += `<h4>On this device</h4>${dev.length ? `<ul>${cap(dev, 4).map(row).join('')}</ul>` : '<p class="muted-note">The first one is made in a moment.</p>'}`;
