@@ -408,3 +408,94 @@ test('if the API ever refuses a schema, Claude answers without it instead of fai
   assert.ok(!sent[1].output_config.format);
   assert.match(sent[1].system, /JSON schema/);
 });
+
+/* ---------- partly done ---------- */
+import { markDone, markPart, markUndone, clearPart } from '../js/store.js';
+
+const pState = (tasks, log = []) => ({ v: 1, tasks, log, meta: { order: {}, plans: {}, dismiss: {}, timer: null, seeded: true }, shared: {} });
+const ent = (id, task, day, extra = {}) => ({ id, task, day, at: `${day}T12:00:00.000Z`, updatedAt: 1, ...extra });
+
+test('partly done is progress, never completion', () => {
+  const today = '2026-11-24';
+  const t = E.normalizeTask({ id: 'bio', title: 'Biology review', date: today, estMin: 60, estMax: 120 }, today);
+  const step = E.normalizeTask({ id: 'step', title: 'Step', repeat: { kind: 'daily' }, start: '2026-11-01' }, today);
+  const s = pState([t, step], [ent('p1', 'bio', today, { part: true }), ent('p2', 'step', '2026-11-23', { part: true }), ent('p3', 'step', today, { part: true })]);
+  const idx = E.buildIndex(s.log);
+  assert.equal(idx.byTask.size, 0, 'nothing counts as done');
+  assert.equal(E.doneCountsByDay(s.log).size, 0);
+  assert.equal(E.lastDoneDay(idx, 'step'), null);
+  const items = E.dayItems(s, idx, today, today);
+  const bio = items.find((i) => i.id === 'bio');
+  const st = items.find((i) => i.id === 'step');
+  assert.equal(bio.status, 'open');
+  assert.equal(bio.part.id, 'p1');
+  assert.equal(st.status, 'open');
+  assert.equal(st.part.id, 'p3');
+  // Yesterday the daily was partly done: that's a record, not a miss.
+  const y = E.dayItems(s, idx, '2026-11-23', today).find((i) => i.id === 'step');
+  assert.equal(y.status, 'part');
+  // A one-off you started yesterday shows as started, and moves up; one partly done today waits.
+  const t2 = E.normalizeTask({ id: 'visa', title: 'Visa form', date: today }, today);
+  const s2 = pState([t2], [ent('v1', 'visa', '2026-11-23', { part: true })]);
+  const idx2 = E.buildIndex(s2.log);
+  const it2 = E.dayItems(s2, idx2, today, today)[0];
+  assert.equal(it2.part.day, '2026-11-23');
+  const base = E.scoreTask(t2, { today, idx: E.buildIndex([]) }).score;
+  assert.ok(E.scoreTask(t2, { today, idx: idx2 }).score > base);
+  assert.ok(E.scoreTask(t, { today, idx }).score < E.scoreTask(t, { today, idx: E.buildIndex([]) }).score);
+  // Yesterday's page keeps the record of working on it.
+  assert.equal(E.dayItems(s2, idx2, '2026-11-23', today)[0].status, 'part');
+});
+
+test('partly done routines: the trail shows it, the streak neither breaks nor grows', () => {
+  const today = '2026-11-24';
+  const t = E.normalizeTask({ id: 'piano', title: 'Piano', repeat: { kind: 'daily' }, start: '2026-11-01' }, today);
+  const log = [ent('a', 'piano', '2026-11-21'), ent('b', 'piano', '2026-11-22'), ent('c', 'piano', '2026-11-23', { part: true }), ent('d', 'piano', today)];
+  const idx = E.buildIndex(log);
+  const trail = E.routineTrail(t, idx, today, 4);
+  assert.deepEqual(trail.map((x) => x.s), ['done', 'done', 'part', 'done']);
+  assert.equal(E.streak(t, idx, today), 3);
+  // Weekly: partly doing it doesn't satisfy the week.
+  const w = E.normalizeTask({ id: 'laundry', title: 'Laundry', repeat: { kind: 'weekflex' }, start: '2026-11-01' }, today);
+  const idxW = E.buildIndex([ent('w1', 'laundry', '2026-11-23', { part: true })]);
+  const it = E.dayItems(pState([w]), idxW, '2026-11-29', '2026-11-29')[0];
+  assert.equal(it?.status, 'open', 'still due by the end of the week');
+  assert.equal(it.part.id, 'w1');
+});
+
+test('marking partly done keeps timed minutes adding up to the finish', () => {
+  const today = '2026-11-24';
+  const t = E.normalizeTask({ id: 'bio', title: 'Biology review', date: today, spent: 40 }, today);
+  const s = pState([t]);
+  markPart(s, t, today);
+  assert.equal(s.log[0].part, true);
+  assert.equal(s.log[0].mins, 40);
+  t.spent += 25;
+  markPart(s, t, today);
+  assert.equal(s.log[1].mins, 25, 'only the new minutes');
+  markDone(s, t, today);
+  assert.equal(s.log[2].mins, 65, 'the finish records the whole time');
+  assert.equal(t.spent, 0);
+  assert.equal(t.spentLogged, 0);
+  // Reopening goes back to partly done instead of wiping the progress.
+  markUndone(s, t, today);
+  const idx = E.buildIndex(s.log);
+  assert.equal(E.partOf(t, idx, today).id, s.log[1].id);
+  // Taking it back clears it.
+  clearPart(s, t, today);
+  assert.equal(E.partOf(t, E.buildIndex(s.log), today), null);
+});
+
+test('habits read partly done as working time, not as things finished', () => {
+  const today = '2026-11-24';
+  const tasks = [{ id: 's', title: 'Step', repeat: { kind: 'daily' } }];
+  const log = [];
+  for (let k = 0; k < 6; k++) {
+    const d = E.addDays(today, -k);
+    log.push({ id: `d${k}`, task: 's', day: d, at: new Date(`${d}T22:10:00`).toISOString(), est: 60 });
+    log.push({ id: `p${k}`, task: 's', day: d, part: true, at: new Date(`${d}T14:00:00`).toISOString() });
+  }
+  const p = E.habitProfile({ tasks, log }, today);
+  assert.match(p.basedOn, /^6 check-offs/);
+  assert.match(p.lines[0], /afternoon/);
+});

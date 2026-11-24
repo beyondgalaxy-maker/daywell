@@ -3361,3 +3361,42 @@ body {
     width: auto;
   }
 }
+
+/* ---------- partly done ---------- */
+/* Half a check: started, not finished. */
+.task.part:not(.done) .check {
+  border-color: var(--spruce);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--spruce) 62%, transparent) 50%, transparent 50%);
+}
+.task.part.missed .check {
+  border-color: color-mix(in srgb, var(--spruce) 60%, var(--faint));
+}
+.part-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--spruce);
+  font-weight: 540;
+}
+.part-tag svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 2;
+}
+.trail i.part {
+  background: linear-gradient(135deg, var(--spruce) 50%, color-mix(in srgb, var(--spruce) 22%, var(--line-2)) 50%);
+}
+.log-row.part .lr-meta {
+  color: var(--spruce);
+}
+.timer-pill button[data-act='timer-part'] {
+  background: color-mix(in srgb, var(--paper) 9%, transparent);
+}
+@media (max-width: 480px) {
+  .timer-pill .tp-lbl {
+    display: none;
+  }
+  .timer-pill button {
+    padding: 5px 9px;
+  }
+}

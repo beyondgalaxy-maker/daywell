@@ -333,6 +333,7 @@ export function normalizeTask(input, today) {
     start: isKey(input.start) ? input.start : today,
     plan: isKey(input.plan) ? input.plan : null,
     spent: Math.max(0, Math.round(Number(input.spent) || 0)),
+    spentLogged: Math.max(0, Math.round(Number(input.spentLogged) || 0)),
     bumps: Math.max(0, Math.round(Number(input.bumps) || 0)),
     again: input.again && Number(input.again.n) > 0 ? { n: Math.min(9, Math.round(Number(input.again.n))), at: Number(input.again.at) || now } : null,
     doneAt: input.doneAt || null,
@@ -366,11 +367,22 @@ export const estMid = (t) => {
 /* Completion log index                                                */
 /* ------------------------------------------------------------------ */
 
+// "Partly done" check-ins are progress, not completion: they're kept apart (parts, partsByDay) so
+// nothing that asks "was it done?" counts them.
 export function buildIndex(log) {
   const byTask = new Map();
   const byDay = new Map();
+  const parts = new Map();
+  const partsByDay = new Map();
   for (const e of log) {
     if (e.deleted) continue;
+    if (e.part) {
+      if (!parts.has(e.task)) parts.set(e.task, []);
+      parts.get(e.task).push(e);
+      if (!partsByDay.has(e.day)) partsByDay.set(e.day, []);
+      partsByDay.get(e.day).push(e);
+      continue;
+    }
     let a = byTask.get(e.task);
     if (!a) byTask.set(e.task, (a = []));
     a.push(e);
@@ -378,18 +390,47 @@ export function buildIndex(log) {
     if (!b) byDay.set(e.day, (b = []));
     b.push(e);
   }
-  for (const a of byTask.values()) a.sort((x, y) => (x.day === y.day ? (x.at < y.at ? -1 : 1) : x.day < y.day ? -1 : 1));
-  return { byTask, byDay };
+  const order = (x, y) => (x.day === y.day ? (x.at < y.at ? -1 : 1) : x.day < y.day ? -1 : 1);
+  for (const a of byTask.values()) a.sort(order);
+  for (const a of parts.values()) a.sort(order);
+  return { byTask, byDay, parts, partsByDay };
 }
 const entriesOf = (idx, id) => idx.byTask.get(id) || [];
 export const entryOn = (idx, id, day) => entriesOf(idx, id).find((e) => e.day === day) || null;
 export const entriesBetween = (idx, id, a, b) => entriesOf(idx, id).filter((e) => e.day >= a && e.day <= b);
+const partsBetween = (idx, id, a, b) => (idx.parts?.get(id) || []).filter((e) => e.day >= a && e.day <= b);
 export function lastDoneDay(idx, id, onOrBefore = null) {
   const a = entriesOf(idx, id);
   for (let i = a.length - 1; i >= 0; i--) if (!a[i].skip && (!onOrBefore || a[i].day <= onOrBefore)) return a[i].day;
   return null;
 }
 export const doneCount = (idx, id) => entriesOf(idx, id).filter((e) => !e.skip).length;
+
+// The "partly done" that applies to a task on day D: for a daily, that day's; for other routines,
+// one from the current occurrence (since it was last due, this week, or since it was last done);
+// for a one-off, the latest one before it's finished. null if it hasn't been started.
+export function partOf(t, idx, D, weekStart = 1) {
+  const ps = idx.parts?.get(t.id);
+  if (!ps?.length || (!t.repeat && t.doneDay)) return null;
+  let from = null;
+  const k = t.repeat?.kind;
+  if (k === 'daily') from = D;
+  else if (k === 'weekly' || k === 'monthly') from = prevScheduled(t, D) || D;
+  else if (k === 'weekflex') from = startOfWeek(D, weekStart);
+  else if (k === 'interval') {
+    const last = lastDoneDay(idx, t.id, D);
+    from = last ? addDays(last, 1) : null;
+  }
+  for (let i = ps.length - 1; i >= 0; i--) {
+    if (ps[i].day > D) continue;
+    return from && ps[i].day < from ? null : ps[i];
+  }
+  return null;
+}
+export const partOn = (idx, id, D) => {
+  const ps = (idx.parts?.get(id) || []).filter((e) => e.day === D);
+  return ps.length ? ps[ps.length - 1] : null;
+};
 
 /* ------------------------------------------------------------------ */
 /* Recurrence                                                          */
@@ -448,13 +489,25 @@ export function nextDue(t, idx, today, weekStart = 1) {
 /* ------------------------------------------------------------------ */
 // item: { t, id, day, status: 'open'|'done'|'skip'|'miss', carried, routine, ... }
 
+// item.part: a "partly done" check-in (see partOf). On past days, a routine that was partly done
+// that day has status 'part', and so does a one-off you worked on that day without finishing.
 export function dayItems(state, idx, D, today, settings = {}) {
   const ws = settings.weekStart ?? 1;
   const out = [];
   for (const t of state.tasks) {
     if (t.deletedAt) continue;
     const it = t.repeat ? recurringOn(t, D, today, idx, ws) : oneTimeOn(t, D, today);
-    if (it) out.push(it);
+    if (it) {
+      if (it.status === 'open' || it.status === 'miss') {
+        const p = idx.parts?.get(t.id) ? partOf(t, idx, D, ws) : null;
+        if (p && it.status === 'open') it.part = p;
+        else if (p && p.day === D) Object.assign(it, { status: 'part', entry: p });
+      }
+      out.push(it);
+    } else if (D < today) {
+      const p = partOn(idx, t.id, D);
+      if (p) out.push({ t, id: t.id, day: D, status: 'part', entry: p, routine: !!t.repeat });
+    }
   }
   return out;
 }
@@ -580,6 +633,16 @@ export function scoreTask(t, { today, idx, weekStart = 1 }) {
     s += Math.min(40, t.bumps * 10);
     if (t.bumps >= 2) why.push(`Pushed back ${t.bumps} times`);
   }
+  // Partly done: one you started on an earlier day moves up (finish what you started); something
+  // you already put time into today waits behind the things you haven't touched yet.
+  const part = idx?.parts?.get(t.id) ? partOf(t, idx, today, weekStart) : null;
+  if (part && part.day === today) {
+    s -= 25;
+    why.push('Partly done today');
+  } else if (part && !t.repeat) {
+    s += 15;
+    why.push(`You started it ${part.day === addDays(today, -1) ? 'yesterday' : 'earlier'}`);
+  }
   // Brought up again: on your mind, so it moves up a little (fading over two weeks). The priority
   // you see doesn't change.
   const again = againCount(t, today);
@@ -678,7 +741,7 @@ export function workload(items) {
     if (it.status !== 'open') continue;
     const m = estMid(it.t);
     if (m == null) unknown++;
-    else mins += Math.max(0, m - (it.t.spent || 0));
+    else mins += Math.max(0, (it.part && !it.t.spent ? Math.round(m / 2) : m) - (it.t.spent || 0));
   }
   return { mins, unknown };
 }
@@ -777,7 +840,8 @@ export function habitProfile(state, today, { days = 28 } = {}) {
   const from = addDays(today, -(days - 1));
   const tasks = new Map((state.tasks || []).map((t) => [t.id, t]));
   const recent = (state.log || []).filter((e) => !e.deleted && e.day >= from && e.day <= today);
-  const done = recent.filter((e) => !e.skip && e.at && !isNaN(Date.parse(e.at)));
+  const worked = recent.filter((e) => !e.skip && e.at && !isNaN(Date.parse(e.at)));
+  const done = worked.filter((e) => !e.part);
   const active = [...new Set(done.map((e) => e.day))].sort();
   if (done.length < 6 || active.length < 3) return null;
   const titleOf = (e) => tasks.get(e.task)?.title || e.title || '';
@@ -792,12 +856,12 @@ export function habitProfile(state, today, { days = 28 } = {}) {
   const usual = {};
 
   const slotCount = HABIT_SLOTS.map(() => 0);
-  for (const e of done) {
+  for (const e of worked) {
     const m = clock(e);
     const i = HABIT_SLOTS.findIndex(([, , a, b]) => m >= a && m < b);
     if (i > -1) slotCount[i]++;
   }
-  const shares = slotCount.map((n, i) => ({ name: HABIT_SLOTS[i][0], range: HABIT_SLOTS[i][1], pct: Math.round((n / done.length) * 100) })).sort((a, b) => b.pct - a.pct);
+  const shares = slotCount.map((n, i) => ({ name: HABIT_SLOTS[i][0], range: HABIT_SLOTS[i][1], pct: Math.round((n / worked.length) * 100) })).sort((a, b) => b.pct - a.pct);
   const top = shares.filter((s) => s.pct >= 20).slice(0, 2);
   const slot = (s, what = '') => `${s.name} (${s.range ? `${s.range}, ` : ''}${s.pct}%${what})`;
   if (top.length && top[0].pct >= 60) lines.push(`Gets most things done ${slot(top[0], ' of check-offs')}.`);
@@ -927,7 +991,7 @@ export function recoverFrom(current, snap, now = Date.now()) {
 
 export function doneCountsByDay(log) {
   const m = new Map();
-  for (const e of log) if (!e.deleted && !e.skip) m.set(e.day, (m.get(e.day) || 0) + 1);
+  for (const e of log) if (!e.deleted && !e.skip && !e.part) m.set(e.day, (m.get(e.day) || 0) + 1);
   return m;
 }
 
@@ -942,6 +1006,10 @@ export function routineTrail(t, idx, today, n = 14) {
     const e = entryOn(idx, t.id, D);
     if (e) {
       out.push({ day: D, s: e.skip ? 'skip' : 'done' });
+      continue;
+    }
+    if (partOn(idx, t.id, D)) {
+      out.push({ day: D, s: 'part' });
       continue;
     }
     const k = t.repeat.kind;
@@ -961,7 +1029,7 @@ export function streak(t, idx, today, weekStart = 1) {
     for (let i = 0; i < 200; i++) {
       if (t.start && addDays(s, 6) < t.start) break;
       if (entriesBetween(idx, t.id, s, addDays(s, 6)).some((e) => !e.skip)) n++;
-      else break;
+      else if (!partsBetween(idx, t.id, s, addDays(s, 6)).length) break; // partly done: kept, not counted
       s = addDays(s, -7);
     }
     return n;
@@ -973,7 +1041,8 @@ export function streak(t, idx, today, weekStart = 1) {
     const next = nextScheduled(t, addDays(occ, 1), 62) || addDays(today, 1);
     const handled = entriesBetween(idx, t.id, occ, addDays(next, -1));
     const done = handled.some((e) => !e.skip);
-    const skipped = !done && handled.some((e) => e.skip);
+    // Skipped or partly done doesn't add to a streak, but doesn't break it either.
+    const skipped = !done && (handled.some((e) => e.skip) || partsBetween(idx, t.id, occ, addDays(next, -1)).length > 0);
     if (done) n++;
     else if (!skipped && !(next > today)) break; // an occurrence still open today doesn't break the streak
     occ = prevScheduled(t, addDays(occ, -1), 400);

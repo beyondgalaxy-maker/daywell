@@ -1,7 +1,7 @@
 // Daywell app: rendering and interactions.
 import * as E from './engine.js';
 import * as AI from './ai.js';
-import { Store, applyChanges, markDone, moveTask, repairState } from './store.js';
+import { Store, applyChanges, markDone, markPart, moveTask, repairState } from './store.js';
 import { Google, HOME_SCRIPT, newSecret, scriptText, validScriptUrl } from './google.js';
 import { I } from './icons.js';
 import * as Backup from './backup.js';
@@ -535,6 +535,12 @@ function subline(it, ctx, place) {
   const today = ctx.today;
   const bits = [];
   if (ctx.timer?.id === t.id) bits.push(`<span><span class="timing-dot"></span>${fmtTimer(Date.now() - ctx.timer.start + (t.spent || 0) * 60000)} so far</span>`);
+  const part = partOfItem(it, ctx);
+  if (part) {
+    const when = part.day === (it.day || today) || it.status === 'part' ? '' : ` ${relWord(part.day, today)}`;
+    const so = it.status === 'part' ? (part.mins ? `, ${E.fmtMins(part.mins)}` : '') : t.spent && ctx.timer?.id !== t.id ? `, ${E.fmtMins(t.spent)} so far` : '';
+    bits.push(`<span class="part-tag">${I.half}Partly done${esc(when)}${so}</span>`);
+  }
   if (place === 'routines') {
     bits.push(`<span>${esc(E.describeRepeat(t.repeat))}</span>`);
     if (t.paused) bits.push('<span>Paused</span>');
@@ -551,7 +557,7 @@ function subline(it, ctx, place) {
   if (aiToday && t.ai.focus) bits.push('<span class="focus-tag">Focus</span>');
   if (aiToday && t.ai.note) {
     bits.push(`<span class="ai-note">${I.spark}${esc(t.ai.note)}</span>`);
-  } else if (it.carried && it.status === 'open' && t.auto?.kind !== 'birthday') {
+  } else if (it.carried && it.status === 'open' && t.auto?.kind !== 'birthday' && !(part && part.day >= it.carried)) {
     bits.push(`<span>From ${esc(relWord(it.carried, today))}</span>`);
   } else if (it.lateDays && it.status === 'open') {
     const last = E.lastDoneDay(ctx.idx, t.id);
@@ -562,7 +568,7 @@ function subline(it, ctx, place) {
   if (it.status === 'miss') bits.push('<span>Missed</span>');
   if (it.status === 'skip') bits.push('<span>Skipped</span>');
   if (it.dueOnly) bits.push('<span>Due this day</span>');
-  if (t.spent && it.status === 'open' && ctx.timer?.id !== t.id) bits.push(`<span>${E.fmtMins(t.spent)} done so far</span>`);
+  if (t.spent && it.status === 'open' && ctx.timer?.id !== t.id && !part) bits.push(`<span>${E.fmtMins(t.spent)} done so far</span>`);
   if (!bits.length && t.notes) bits.push(`<span>${esc(firstLine(t.notes))}</span>`);
   return bits.join('');
 }
@@ -589,16 +595,25 @@ function metaBits(it, ctx, place) {
   return out.join('');
 }
 
+// The "partly done" a row shows: a past day's record, or progress on something still open.
+function partOfItem(it, ctx) {
+  if (it.status === 'part') return it.entry || null;
+  if (it.status !== 'open') return null;
+  if (it.part !== undefined) return it.part;
+  return E.partOf(it.t, ctx.idx, it.day || ctx.today, ctx.ws);
+}
+
 function taskRow(it, ctx, place = 'day', opts = {}) {
   const t = it.t;
   const st = it.status;
   const done = st === 'done';
   const timing = ctx.timer?.id === t.id;
-  const cls = ['task', `p${t.priority}`, done && 'done', st === 'skip' && 'skipped', st === 'miss' && 'missed', t.optional && 'optional', timing && 'timing', opts.next && 'up-next', t.auto?.kind === 'birthday' && !done && 'bday'].filter(Boolean).join(' ');
+  const part = partOfItem(it, ctx);
+  const cls = ['task', `p${t.priority}`, done && 'done', part && 'part', st === 'skip' && 'skipped', st === 'miss' && 'missed', t.optional && 'optional', timing && 'timing', opts.next && 'up-next', t.auto?.kind === 'birthday' && !done && 'bday'].filter(Boolean).join(' ');
   const tag = opts.next ? `<span class="next-tag${opts.bonus ? ' bonus' : ''}">${opts.bonus ? 'Bonus' : 'Up next'}</span>` : '';
   const sub = tag + subline(it, ctx, place);
   const start = opts.next && !timing ? `<button type="button" class="start-btn" data-act="start" aria-label="Start a timer for “${esc(t.title)}”">${I.play}<span>Start</span></button>` : '';
-  const label = done || st === 'skip' ? `Mark “${t.title}” not done` : `Mark “${t.title}” done`;
+  const label = done || st === 'skip' ? `Mark “${t.title}” not done` : `Mark “${t.title}” done${part ? ' (it’s partly done)' : ''}`;
   const quick = (place === 'all' || place === 'later') && !done ? `<button type="button" class="quick" data-act="to-today" title="Do today" aria-label="Do “${esc(t.title)}” today">${I.sun}</button>` : '';
   return `<li class="${cls}" data-id="${t.id}" data-day="${it.day || ''}" data-status="${st}">
 <span class="grip" aria-hidden="true">${I.grip}</span>
@@ -619,7 +634,7 @@ function renderDay(ctx) {
   const items = E.dayItems(ctx.s, ctx.idx, D, today, ctx.settings);
   const open = sortDay(E.orderOpen(items.filter((i) => i.status === 'open'), D, ctx.s, ctx.sc), D, ctx);
   const finished = items
-    .filter((i) => i.status === 'done' || i.status === 'skip')
+    .filter((i) => i.status === 'done' || i.status === 'skip' || i.status === 'part')
     .sort((a, b) => String(b.entry?.at || b.t.doneAt || '').localeCompare(String(a.entry?.at || a.t.doneAt || '')));
   const missed = items.filter((i) => i.status === 'miss');
   const prog = progressOf(items);
@@ -646,7 +661,9 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const showWelcome = isToday && !ctx.s.meta.seeded && !ctx.s.tasks.some((t) => !t.purged);
   if (showWelcome) html += welcomeHtml();
   // One clear next step: the first must-do; once those are done, optional ones become a bonus.
-  const nextItem = isToday ? open.find((i) => !i.dueOnly && !i.t.optional) || open.find((i) => !i.dueOnly) : null;
+  // Something you partly did today waits until the untouched ones are done.
+  const fresh_ = (i) => !(i.part && i.part.day === D);
+  const nextItem = isToday ? open.find((i) => !i.dueOnly && !i.t.optional && fresh_(i)) || open.find((i) => !i.dueOnly && !i.t.optional) || open.find((i) => !i.dueOnly) : null;
   const bonus = !!nextItem?.t.optional;
   // A one-time hint so the phone gestures are discoverable.
   if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe right when done, left for later. Hold to move.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
@@ -696,7 +713,7 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   if (isToday && prog.total && prog.doneN >= prog.total && ui.lastProgress && ui.lastProgress.day === D && ui.lastProgress.doneN < prog.doneN) {
     requestAnimationFrame(() => celebrate($('#dayCol .ring'), 22));
   }
-  ui.lastProgress = { day: D, doneN: prog.doneN, total: prog.total, key };
+  ui.lastProgress = { day: D, doneN: prog.doneN, total: prog.total, pct: prog.pct, key };
 }
 
 // The ring counts the daily routines: that's the realistic list for a day. Other to-dos are extra
@@ -708,8 +725,11 @@ function progressOf(items) {
   const base = split ? daily : items;
   const doneN = base.filter((i) => i.status === 'done').length;
   const required = base.filter((i) => i.status === 'open' && !i.t.optional && !i.dueOnly).length;
+  // Partly done today: still to go, but it fills half its share of the ring.
+  const partN = base.filter((i) => i.status === 'open' && !i.t.optional && !i.dueOnly && i.part && i.part.day === i.day).length;
   const extras = split ? items.filter((i) => !E.isDaily(i.t) && i.status === 'done').length : 0;
-  return { doneN, total: doneN + required, left: required, extras, split };
+  const total = doneN + required;
+  return { doneN, partN, total, left: required, extras, split, pct: total ? (doneN + partN / 2) / total : 0 };
 }
 
 const pick = (list, seed) => {
@@ -719,11 +739,13 @@ const pick = (list, seed) => {
 };
 
 function cheerHtml(ctx, D, prog, isToday) {
-  const { doneN, total, left } = prog;
-  const pct = total ? doneN / total : 0;
+  const { doneN, total, left, partN } = prog;
+  const pct = prog.pct;
   const complete = total > 0 && doneN >= total;
   const entries = (ctx.idx.byDay.get(D) || []).filter((e) => !e.skip);
-  const minsDone = entries.reduce((a, e) => a + (e.mins || e.est || 0), 0);
+  // Timed minutes from partly done work count too (an untimed one adds nothing: we can't know).
+  const doneIds = new Set(entries.map((e) => e.task));
+  const minsDone = entries.reduce((a, e) => a + (e.mins || e.est || 0), 0) + (ctx.idx.partsByDay?.get(D) || []).filter((e) => !doneIds.has(e.task)).reduce((a, e) => a + (e.mins || 0), 0);
   let line;
   const seed = `${D}${doneN}`;
   if (!isToday) {
@@ -743,6 +765,7 @@ function cheerHtml(ctx, D, prog, isToday) {
     line = `${greet} ${msg}`;
   }
   const subs = [];
+  if (partN && !complete) subs.push(`${partN} partly done`);
   if (prog.extras) subs.push(`${prog.extras} to-do${prog.extras === 1 ? '' : 's'} done too`);
   if (minsDone >= 10) subs.push(`${E.fmtMins(minsDone)} of work done`);
   if (isToday) {
@@ -758,7 +781,7 @@ function cheerHtml(ctx, D, prog, isToday) {
       if (y) subs.push(`${y} done yesterday`);
     }
   }
-  const from = ui.lastProgress && ui.lastProgress.day === D && ui.lastProgress.total === total ? (ui.lastProgress.doneN / Math.max(1, total)) * 100 : pct * 100;
+  const from = ui.lastProgress && ui.lastProgress.day === D && ui.lastProgress.total === total ? (ui.lastProgress.pct ?? ui.lastProgress.doneN / Math.max(1, total)) * 100 : pct * 100;
   const what = prog.split ? 'dailies' : 'things';
   const ring = `<div class="ring${complete ? ' complete' : ''}" role="img" aria-label="${complete ? `All ${what} done` : `${left} ${what} to go`}" style="--from:${from.toFixed(1)};--to:${(pct * 100).toFixed(1)}">
 <svg viewBox="0 0 48 48" aria-hidden="true"><circle class="r-track" cx="24" cy="24" r="20"/><circle class="r-fill" cx="24" cy="24" r="20" pathLength="100"/></svg>
@@ -978,7 +1001,7 @@ function renderCalendar(ctx) {
   }
   const items = E.dayItems(ctx.s, ctx.idx, sel, today, ctx.settings);
   const open = E.orderOpen(items.filter((i) => i.status === 'open'), sel, ctx.s, ctx.sc);
-  const fin = items.filter((i) => i.status === 'done' || i.status === 'skip');
+  const fin = items.filter((i) => i.status === 'done' || i.status === 'skip' || i.status === 'part');
   const missed = items.filter((i) => i.status === 'miss');
   const evs = google.eventsOn(sel);
   const relSel = E.fmtRelDay(sel, today, { long: true });
@@ -1007,15 +1030,19 @@ function renderHistory(ctx) {
   const { today, s, idx } = ctx;
   const ws = E.startOfWeek(today, ctx.ws);
   const live = s.log.filter((e) => !e.deleted);
-  const doneEntries = live.filter((e) => !e.skip);
+  const doneEntries = live.filter((e) => !e.skip && !e.part);
   const weekDone = doneEntries.filter((e) => e.day >= ws).length;
-  const weekMins = doneEntries.filter((e) => e.day >= ws).reduce((a, e) => a + (e.mins || 0), 0);
+  const doneThisWeek = new Set(doneEntries.filter((e) => e.day >= ws).map((e) => e.task));
+  const weekMins = doneEntries.filter((e) => e.day >= ws).reduce((a, e) => a + (e.mins || 0), 0) + live.filter((e) => e.part && e.day >= ws && !doneThisWeek.has(e.task)).reduce((a, e) => a + (e.mins || 0), 0);
   const routines = s.tasks.filter((t) => t.repeat && !t.deletedAt && !t.purged);
   let sched = 0;
   let hit = 0;
   for (const t of routines) for (const p of E.routineTrail(t, idx, today, E.diffDays(ws, today) + 1)) {
     if (p.s === 'done') {
       hit++;
+      sched++;
+    } else if (p.s === 'part') {
+      hit += 0.5;
       sched++;
     } else if (p.s === 'miss') sched++;
   }
@@ -1035,7 +1062,7 @@ function renderHistory(ctx) {
       const trail = E.routineTrail(t, idx, today, 14);
       const st = E.streak(t, idx, today, ctx.ws);
       const last = E.lastDoneDay(idx, t.id);
-      return `<div class="routine-row"><div><div class="rr-title" data-act="open" data-id="${t.id}" role="button" tabindex="0">${esc(t.title)}</div><div class="rr-meta">${esc(E.describeRepeat(t.repeat))}${last ? `, last done ${esc(relWord(last, today))}` : ', not done yet'}</div><div class="trail">${trail.map((p) => `<i class="${p.s}" title="${E.fmtShortDate(p.day)}: ${p.s === 'miss' ? 'missed' : p.s === 'off' ? 'not scheduled' : p.s === 'today' ? 'today' : p.s}"></i>`).join('')}</div></div><div class="rr-streak">${st >= 2 ? `${st}-${t.repeat.kind === 'weekflex' ? 'week' : 'day'} streak` : ''}</div></div>`;
+      return `<div class="routine-row"><div><div class="rr-title" data-act="open" data-id="${t.id}" role="button" tabindex="0">${esc(t.title)}</div><div class="rr-meta">${esc(E.describeRepeat(t.repeat))}${last ? `, last done ${esc(relWord(last, today))}` : ', not done yet'}</div><div class="trail">${trail.map((p) => `<i class="${p.s}" title="${E.fmtShortDate(p.day)}: ${p.s === 'miss' ? 'missed' : p.s === 'off' ? 'not scheduled' : p.s === 'today' ? 'today' : p.s === 'part' ? 'partly done' : p.s}"></i>`).join('')}</div></div><div class="rr-streak">${st >= 2 ? `${st}-${t.repeat.kind === 'weekflex' ? 'week' : 'day'} streak` : ''}</div></div>`;
     })
     .join('');
   const byDay = new Map();
@@ -1053,8 +1080,9 @@ function renderHistory(ctx) {
         .map((e) => {
           const t = store.task(e.task);
           const name = t && !t.purged ? t.title : e.title || 'Deleted task';
-          const meta = [e.mins ? E.fmtMins(e.mins) : '', e.at ? E.fmtClock(new Date(e.at)) : ''].filter(Boolean).join(', ');
-          return `<div class="log-row"><span class="lr-title${e.skip ? ' skip' : ''}">${esc(name)}</span><span class="lr-meta">${e.skip ? 'skipped' : esc(meta)}</span>${t && !t.purged && !t.deletedAt ? `<button type="button" data-act="reopen" data-id="${t.id}" data-day="${D}">${e.skip ? 'Unskip' : 'Reopen'}</button>` : ''}</div>`;
+          const meta = [e.part ? 'partly done' : '', e.mins ? E.fmtMins(e.mins) : '', e.at ? E.fmtClock(new Date(e.at)) : ''].filter(Boolean).join(', ');
+          const btn = e.part ? `<button type="button" data-act="remove-entry" data-e="${esc(e.id)}">Remove</button>` : `<button type="button" data-act="reopen" data-id="${t?.id}" data-day="${D}">${e.skip ? 'Unskip' : 'Reopen'}</button>`;
+          return `<div class="log-row${e.part ? ' part' : ''}"><span class="lr-title${e.skip ? ' skip' : ''}">${esc(name)}</span><span class="lr-meta">${e.skip ? 'skipped' : esc(meta)}</span>${t && !t.purged && !t.deletedAt ? btn : ''}</div>`;
         })
         .join('')}</div>`;
     })
@@ -1081,7 +1109,7 @@ function renderTimer(ctx) {
     return;
   }
   pill.hidden = false;
-  pill.innerHTML = `<span class="tp-title">${esc(t.title)}</span><span class="tp-time" id="tpTime">${fmtTimer(Date.now() - tm.start)}</span><button type="button" data-act="timer-done">${I.tick}Done</button><button type="button" data-act="timer-stop" aria-label="Stop timer">${I.stop}Stop</button>`;
+  pill.innerHTML = `<span class="tp-title">${esc(t.title)}</span><span class="tp-time" id="tpTime">${fmtTimer(Date.now() - tm.start)}</span><button type="button" data-act="timer-done">${I.tick}Done</button><button type="button" data-act="timer-part" aria-label="Partly done" title="Stop the timer and mark it partly done">${I.half}<span class="tp-lbl">Partly</span></button><button type="button" data-act="timer-stop" aria-label="Stop timer">${I.stop}<span class="tp-lbl">Stop</span></button>`;
 }
 
 function targetDay() {
@@ -1106,6 +1134,8 @@ function autoMode(v) {
   if (t.split(/[,;]+|\s+(?:and then|then|also)\s+/i).filter((x) => x.trim().length > 1).length >= 3) return 'ask';
   if (/\?\s*$/.test(t)) return 'ask';
   if (/^(please\s+)?(move|delete|remove|finish|complete|mark|reschedule|push|postpone|rename|change|clear|cancel|plan|sort|organi[sz]e|prioriti[sz]e|what|when|which|how|should|can you|could you|help me|i have|i need to|i want to)\b/i.test(t)) return 'ask';
+  // Progress reports ("did half of the bio review", "finished laundry") aren't new tasks.
+  if (/^(i\s+)?(did|done|finished|started|worked on|partly|partially|half of|halfway|made progress|got through|got some)\b/i.test(t)) return 'ask';
   if (t.length > 100) return 'ask';
   return 'add';
 }
@@ -1193,6 +1223,7 @@ function renderAIPanel() {
   if (r.created.length) chips.push(`Added ${r.created.length}`);
   if (r.updated.length) chips.push(`Updated ${r.updated.length}`);
   if (r.completed.length) chips.push(`Completed ${r.completed.length}`);
+  if (r.partial?.length) chips.push(`Partly done ${r.partial.length}`);
   if (r.removed.length) chips.push(`Deleted ${r.removed.length}`);
   if (r.sorted) chips.push('Sorted today');
   const same = r.same || [];
@@ -1207,6 +1238,7 @@ function renderAIPanel() {
   const FIELD = { title: 'title', notes: 'notes', priority: 'priority', area: 'area', estMin: 'time estimate', estMax: 'time estimate', optional: 'optional', date: 'date', deadline: 'deadline', time: 'time', repeat: 'repeat' };
   for (const u of r.updated) detail.push(`<li><span class="k">Updated</span><span>${esc(title(u.id))} <span class="m-area">${esc([...new Set(u.fields.map((f) => FIELD[f] || f))].join(', '))}</span></span></li>`);
   for (const id of r.completed) detail.push(`<li><span class="k">Done</span><span>${esc(title(id))}</span></li>`);
+  for (const id of r.partial || []) detail.push(`<li><span class="k">Partly done</span><span>${esc(title(id))}</span></li>`);
   for (const id of r.removed) detail.push(`<li><span class="k">Deleted</span><span>${esc(title(id))}</span></li>`);
   // Already on the list: say so, and let you keep it as its own task if Claude matched wrong.
   const sameHtml = same.length
@@ -1347,6 +1379,10 @@ function renderDrawer() {
 <textarea class="dr-title" data-f="title" rows="1" aria-label="Title">${esc(t.title)}</textarea>
 <div class="dr-done"><button type="button" class="chip-btn${doneToday ? ' on' : ''}" data-dr="toggle-done">${I.tick}${doneToday ? (rep ? 'Done today' : 'Done') : rep ? 'Mark done today' : 'Mark done'}</button>
 <button type="button" class="chip-btn" data-dr="timer">${timing ? `${I.stop}Stop timer` : `${I.play}Start timer`}</button>
+${(() => {
+    const ps = partState(t, null, ctx);
+    return ps.part ? `<button type="button" class="chip-btn on" data-dr="unpart" title="Take back “partly done”">${I.half}Partly done${rep ? ' today' : ''}</button>` : `<button type="button" class="chip-btn" data-dr="part">${I.half}${ps.done ? 'Only partly done' : 'Partly done'}</button>`;
+  })()}
 ${rep && !doneToday ? '<button type="button" class="chip-btn" data-dr="skip">Skip today</button>' : ''}</div>
 <div class="field"><span class="label">Priority</span><div class="seg" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-dr="pri" data-v="${p}" aria-pressed="${t.priority === p}">${E.PRIORITY_NAMES[p]}</button>`).join('')}</div></div>
 <div class="field"><label for="drDate">${rep ? 'Next one on' : 'Do on'}</label><div><div class="row"><input id="drDate" class="inp" type="date" data-f="${rep ? 'plan' : 'date'}" value="${(rep ? t.plan : t.date) || ''}"><button type="button" class="chip-btn" data-dr="date" data-v="">${rep ? 'Usual schedule' : 'No date'}</button></div><div class="row" style="margin-top:6px">${dateChips}</div></div></div>
@@ -1449,8 +1485,15 @@ function openMenu(anchor, id, day) {
     ['Next week', E.resolveDate('next week', today, ws)],
   ];
   const timing = store.state.meta.timer?.id === id;
+  const ps = partState(t, day, ctx);
+  const partBtn = ps.done
+    ? `<button type="button" class="mi" role="menuitem" data-m="part">${I.half}Only partly done</button>`
+    : ps.part
+      ? `<button type="button" class="mi" role="menuitem" data-m="unpart">${I.half}Not partly done<small>take it back</small></button>`
+      : `<button type="button" class="mi" role="menuitem" data-m="part">${I.half}Partly done</button>`;
   const m = $('#menu');
   m.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><div class="m-pris" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-m="pri" data-v="${p}" aria-pressed="${t.priority === p}" title="${E.PRIORITY_NAMES[p]}">P${p}</button>`).join('')}</div>
+${partBtn}${rep?.kind === 'daily' ? '' : '<hr>'}
 ${rep?.kind === 'daily' ? '' : `${opts.map(([l, v]) => `<button type="button" class="mi" role="menuitem" data-m="move" data-v="${v}">${l === 'Today' ? I.sun : I.calendar}${l}<small>${E.fmtShortDate(v)}</small></button>`).join('')}
 <div class="m-date"><input type="date" class="inp" data-m="pick" aria-label="Pick a date" min="${today}"></div>
 <button type="button" class="mi" role="menuitem" data-m="move" data-v="">${I.x}${rep ? 'Back to its usual schedule' : 'No date'}</button><hr>`}
@@ -1476,6 +1519,22 @@ ${rep && inToday ? `<button type="button" class="mi" role="menuitem" data-m="ski
   }
   m.querySelector('.mi')?.focus({ preventScroll: true });
 }
+// Which day a "partly done" from this row counts for (today, or the past day you're looking at),
+// and where the task stands on it.
+function partState(t, rowDay, ctx = ctxNow()) {
+  const today = ctx.today;
+  const day = rowDay && rowDay < today ? rowDay : today;
+  const done = t.repeat ? !!E.entryOn(ctx.idx, t.id, day) && !E.entryOn(ctx.idx, t.id, day).skip : !!t.doneDay;
+  const p = done ? null : E.partOf(t, ctx.idx, day, ctx.ws);
+  return { day, done, part: p && p.day === day ? p : null, earlier: p && p.day !== day ? p : null };
+}
+function markPartly(t, rowDay) {
+  const { day, done } = partState(t, rowDay);
+  store.partDone(t.id, day);
+  const msg = done ? 'Changed to partly done' : t.repeat?.kind === 'daily' ? `Partly done ${day === store.today ? 'today' : relWord(day, store.today)}` : day === store.today && !t.repeat ? 'Partly done. It stays on your list' : 'Marked partly done';
+  undoToast(msg, lastStep());
+}
+
 function closeMenu() {
   const m = $('#menu');
   if (m.hidden) return;
@@ -1502,6 +1561,10 @@ function onMenu(act, el) {
   } else if (act === 'skip') {
     store.skip(t.id, today);
     undoToast(`Skipped “${t.title}” today`, lastStep());
+  } else if (act === 'part') markPartly(t, f.day);
+  else if (act === 'unpart') {
+    store.unpartDone(t.id, partState(t, f.day).day);
+    undoToast('Took back “partly done”', lastStep());
   } else if (act === 'timer') toggleTimer(t.id);
   else if (act === 'open') openDrawer(t.id);
   else if (act === 'dup') duplicate(t);
@@ -1536,6 +1599,7 @@ function toggleCheck(li) {
   if (!t) return;
   const day = li.dataset.day || store.today;
   const st = li.dataset.status;
+  if (st === 'part' && !t.repeat && t.doneDay) return toast(`Already finished ${relWord(t.doneDay, store.today)}`);
   if (st === 'done' || st === 'skip') {
     store.uncomplete(id, t.repeat ? day : t.doneDay || day);
     return;
@@ -1684,7 +1748,7 @@ async function askClaude(textArg) {
 function applyCommand(data, ids, text = '') {
   const today = store.today;
   const refs = new Map();
-  const out = { reply: String(data.reply || ''), created: [], updated: [], same: [], completed: [], removed: [], questions: [], step: null, sorted: null, birthdays: [] };
+  const out = { reply: String(data.reply || ''), created: [], updated: [], same: [], completed: [], partial: [], removed: [], questions: [], step: null, sorted: null, birthdays: [] };
   const order = [...new Set((data.order || []).map((x) => ids.long(x)).filter((id) => id && store.task(id)))];
   const sid = order.length > 1 ? E.uid('s') : null;
   const sortFrom = store.settings.sortBy || 'plan';
@@ -1740,6 +1804,15 @@ function applyCommand(data, ids, text = '') {
       if (t.repeat ? E.entryOn(idx, t.id, today) : t.doneDay) continue;
       markDone(s, t, today);
       out.completed.push(id);
+    }
+    for (const sid of data.partial || []) {
+      const id = ids.long(sid);
+      const t = s.tasks.find((x) => x.id === id);
+      if (!t || t.deletedAt || t.purged || out.completed.includes(id) || out.partial.includes(id)) continue;
+      if (t.repeat ? E.entryOn(idx, t.id, today) : t.doneDay) continue;
+      if (s.meta.timer?.id === t.id) store.stopTimerInner(s, true);
+      markPart(s, t, today);
+      out.partial.push(id);
     }
     for (const sid of data.remove || []) {
       const id = ids.long(sid);
@@ -3040,6 +3113,10 @@ function onClick(e) {
       return store.transact('Started empty', (s) => (s.meta.seeded = true), { undoable: false });
     case 'timer-done':
       return store.finishTimer();
+    case 'timer-part': {
+      const t = store.partTimer();
+      return t && undoToast(`Partly done${t.spent ? `: ${E.fmtMins(t.spent)} so far` : ''}`, lastStep());
+    }
     case 'timer-stop':
       return store.stopTimer(true);
     case 'cal-day':
@@ -3061,6 +3138,10 @@ function onClick(e) {
       ui.day = a.dataset.day === today ? null : a.dataset.day;
       ui.tab = 'today';
       return setView('today');
+    case 'remove-entry': {
+      store.removeEntry(a.dataset.e);
+      return undoToast('Removed it from your history', lastStep());
+    }
     case 'reopen': {
       const t = store.task(a.dataset.id);
       if (!t) return;
@@ -3141,6 +3222,15 @@ async function onDrawer(act, el) {
   if (!t) return closeDrawer();
   const today = store.today;
   ui.editStep = null;
+  if (act === 'part') {
+    markPartly(t, null);
+    return renderDrawer();
+  }
+  if (act === 'unpart') {
+    store.unpartDone(t.id, today);
+    undoToast('Took back “partly done”', lastStep());
+    return renderDrawer();
+  }
   if (act === 'toggle-done') {
     const done = t.repeat ? !!E.entryOn(E.buildIndex(store.state.log), t.id, today) : !!t.doneDay;
     if (done) store.uncomplete(t.id, t.repeat ? today : t.doneDay);

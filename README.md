@@ -30,6 +30,7 @@ It's a static site with no server and no account. Tasks live in your browser. Op
 - The bar under the date is your day: events, what's already passed, and how your task time fits into the free time left.
 - **Calendar** shows any month and any day's plan, history, and events. **History** shows streaks, a six-month heatmap, everything you finished, and recently deleted tasks.
 - Start a timer on any task; Daywell remembers how long things really took and Claude uses that to correct its estimates.
+- **Partly done** (in a task's ⋯ menu, its details, or the timer bar) logs progress without checking it off. A one-off stays on your list and comes back as "Partly done yesterday"; a routine gets a half square in its history that keeps the streak without adding to it. Tell Claude "did half of the bio review" and it does the same, noting what's left.
 
 ## Connect Claude
 

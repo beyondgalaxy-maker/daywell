@@ -266,6 +266,34 @@ export class Store {
     if (!t) return;
     this.transact(`Reopened “${t.title}”`, (s) => markUndone(s, t, day ?? t.doneDay ?? this.today));
   }
+  // Partly done: logged for that day without counting as done. A one-off stays on your list, a
+  // routine is marked for the day, a running timer stops and its minutes carry on to the finish.
+  // Marking something you'd checked off as partly done takes the check off.
+  partDone(id, day = this.today) {
+    const t = this.task(id);
+    if (!t) return;
+    this.transact(`Partly did “${t.title}”`, (s) => {
+      if (s.meta.timer?.id === t.id) this.stopTimerInner(s, true);
+      const idx = E.buildIndex(s.log);
+      if (t.repeat ? E.entryOn(idx, t.id, day) : t.doneDay) markUndone(s, t, t.repeat ? day : t.doneDay);
+      markPart(s, t, day);
+    });
+  }
+  // Takes back "partly done" (the one showing for that day, and any earlier ones it stood for).
+  unpartDone(id, day = this.today) {
+    const t = this.task(id);
+    if (!t) return;
+    this.transact(`Took back “partly done” on “${t.title}”`, (s) => clearPart(s, t, day, this.settings.weekStart ?? 1));
+  }
+  // Removes one check-in from the history (a "partly done" from the History list).
+  removeEntry(entryId) {
+    const e = this.state.log.find((x) => x.id === entryId && !x.deleted);
+    if (!e) return;
+    this.transact(`Removed a check-in for “${this.task(e.task)?.title || e.title || 'a task'}”`, () => {
+      e.deleted = true;
+      e.updatedAt = Date.now();
+    });
+  }
   skip(id, day = this.today) {
     const t = this.task(id);
     if (!t) return;
@@ -337,6 +365,14 @@ export class Store {
   stopTimer(keep = true) {
     this.transact('Stopped timer', (s) => this.stopTimerInner(s, keep), { undoable: false });
   }
+  partTimer() {
+    const tm = this.state.meta.timer;
+    if (!tm?.id) return null;
+    const t = this.task(tm.id);
+    if (!t) return this.stopTimer(false);
+    this.partDone(t.id, this.today);
+    return t;
+  }
   finishTimer() {
     const tm = this.state.meta.timer;
     if (!tm?.id) return;
@@ -383,14 +419,16 @@ export function markDone(s, t, day, mins = null) {
     t.bumps = 0;
   }
   t.spent = 0;
+  t.spentLogged = 0;
   t.updatedAt = now;
   if (s.meta.timer?.id === t.id) s.meta.timer = { id: null, updatedAt: now };
 }
 
+// Reopening keeps any "partly done" from that day, so it goes back to how it was before.
 export function markUndone(s, t, day) {
   const now = Date.now();
   for (const e of s.log) {
-    if (e.task === t.id && e.day === day && !e.deleted) {
+    if (e.task === t.id && e.day === day && !e.deleted && !e.part) {
       e.deleted = true;
       e.updatedAt = now;
     }
@@ -398,6 +436,28 @@ export function markUndone(s, t, day) {
   if (!t.repeat) {
     t.doneAt = null;
     t.doneDay = null;
+  }
+  t.updatedAt = now;
+}
+
+// mins = timed minutes since the last check-in. The total keeps adding up in t.spent until the
+// task is finished, so the final check-off records how long the whole thing took.
+export function markPart(s, t, day) {
+  const now = Date.now();
+  const session = Math.max(0, (t.spent || 0) - (t.spentLogged || 0));
+  s.log.push({ id: E.uid('l'), task: t.id, day, at: new Date().toISOString(), title: t.title, part: true, mins: session || null, est: E.estMid(t), updatedAt: now });
+  t.spentLogged = t.spent || 0;
+  t.updatedAt = now;
+}
+
+export function clearPart(s, t, day, weekStart = 1) {
+  const now = Date.now();
+  for (let guard = 0; guard < 50; guard++) {
+    const p = E.partOf(t, E.buildIndex(s.log), day, weekStart);
+    if (!p) break;
+    const e = s.log.find((x) => x.id === p.id);
+    e.deleted = true;
+    e.updatedAt = now;
   }
   t.updatedAt = now;
 }

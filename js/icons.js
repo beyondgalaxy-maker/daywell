@@ -38,5 +38,6 @@ export const I = {
   flag: svg('<path d="M5.5 21V4M5.5 4.5h11l-2.2 4 2.2 4h-11"/>'),
   clock: svg('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>'),
   skip: svg('<path d="M6 6l7 6-7 6zM16.5 6v12"/>'),
+  half: svg('<circle cx="12" cy="12" r="7.5"/><path d="M12 4.5a7.5 7.5 0 0 1 0 15z" fill="currentColor" stroke="none"/>'),
   dup: svg('<rect x="8.5" y="8.5" width="12" height="12" rx="2.5"/><path d="M5.5 15.5a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2"/>'),
 };
