@@ -509,3 +509,28 @@ test('app, service worker and version.json agree on the version', async () => {
   assert.equal(sw, app);
   assert.equal(vj, app);
 });
+
+test('birthdays come out of a contacts export, and nothing else does', () => {
+  const vcf = [
+    'BEGIN:VCARD', 'VERSION:3.0', 'N:UofG;Emily;;;', 'FN:Emily UofG', 'TEL;type=CELL:+1 555 555 5555', 'EMAIL:emily@example.com', 'BDAY;X-APPLE-OMIT-YEAR=1604:1604-11-24', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:Sam Florek', 'BDAY;VALUE=date:2004-03-03', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:4.0', 'FN:Ana Lee', 'BDAY:--1209', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'N:Swarup;Adith;;;', 'BDAY:20041122', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:2.1', 'FN;CHARSET=UTF-8;ENCODING=QUOTED-PRINTABLE:Jos=C3=A9 G=C3=B3m=', 'ez', 'BDAY:1999-07-04', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:Long Name That Wraps', '  Over Lines', 'BDAY:2001-05-06', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:Not A Date', 'BDAY:2001-02-30', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:No Birthday', 'END:VCARD',
+    'BEGIN:VCARD', 'VERSION:3.0', 'FN:Emily UofG', 'BDAY:2004-11-24', 'END:VCARD',
+  ].join('\r\n');
+  const got = E.birthdaysFromVcf(vcf);
+  assert.deepEqual(got, [
+    { name: 'Emily UofG', md: '11-24' },
+    { name: 'Sam Florek', md: '03-03' },
+    { name: 'Ana Lee', md: '12-09' },
+    { name: 'Adith Swarup', md: '11-22' },
+    { name: 'José Gómez', md: '07-04' },
+    { name: 'Long Name That Wraps Over Lines', md: '05-06' },
+  ]);
+  assert.ok(!JSON.stringify(got).includes('555'), 'no phone numbers or emails kept');
+  assert.deepEqual(E.birthdaysFromVcf('not a vcard'), []);
+});

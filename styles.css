@@ -3462,3 +3462,22 @@ body {
     height: 18px;
   }
 }
+
+/* birthdays: import from contacts */
+.bd-import {
+  margin-top: 10px;
+}
+.bd-import .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+.bd-how {
+  margin-top: 6px;
+  max-width: 62ch;
+  line-height: 1.5;
+}
+.bd-how b {
+  font-weight: 620;
+  color: var(--ink-2);
+}

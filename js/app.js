@@ -7,7 +7,7 @@ import { I } from './icons.js';
 import * as Backup from './backup.js';
 
 // Bump with sw.js (CACHE) and version.json on every release; a test keeps the three in step.
-const APP_VERSION = 14;
+const APP_VERSION = 15;
 
 const store = new Store();
 const google = new Google(store);
@@ -417,9 +417,13 @@ function calendarBirthdays(evs, today) {
 function ensureBirthdays() {
   const today = store.today;
   const want = new Map();
+  const firsts = new Set();
   const wish = (who, D) => {
     const id = `bday-${E.bdayKey(who)}-${D}`;
-    if (!want.has(id)) want.set(id, { id, who, D });
+    const k = `${D}|${E.firstName(who)}`;
+    if (want.has(id) || firsts.has(k)) return;
+    firsts.add(k);
+    want.set(id, { id, who, D });
   };
   for (const D of [today, E.addDays(today, 1)]) {
     if (google.configured) for (const b of calendarBirthdays(google.eventsOn(D), today)) if (b.D === D) wish(b.who, D);
@@ -584,8 +588,8 @@ function metaBits(it, ctx, place) {
   if (est) out.push(`<span class="m-est">${est}</span>`);
   const bday = t.auto?.kind === 'birthday';
   if (bday && it.status !== 'done' && !t.doneDay) {
-    const d = E.diffDays(ctx.today, t.auto.day);
-    out.push(`<span class="m-bday">${I.cake}${d <= 0 ? 'Birthday today' : d === 1 ? 'Birthday tomorrow' : `Birthday ${E.fmtRelDay(t.auto.day, ctx.today)}`}</span>`);
+    const d = E.diffDays(E.keyFromDate(new Date()), t.auto.day);
+    out.push(`<span class="m-bday">${I.cake}${d < 0 ? 'Birthday was yesterday' : d === 0 ? 'Birthday today' : d === 1 ? 'Birthday tomorrow' : `Birthday ${E.fmtRelDay(t.auto.day, ctx.today)}`}</span>`);
   } else if (t.deadline && it.status !== 'done' && !t.doneDay) {
     const d = E.diffDays(ctx.today, t.deadline);
     const cls = d < 0 ? 'over' : d <= 2 ? 'soon' : '';
@@ -805,8 +809,21 @@ function tidyEvent(title) {
   return { main, note };
 }
 
+// Calendar events, plus birthdays you added or imported from your contacts (those aren't on a
+// Google calendar), shown as all-day events. A birthday already on your calendar isn't repeated.
+function dayEvents(D) {
+  const evs = google.configured ? google.eventsOn(D) : [];
+  const bds = E.birthdaysOn(D, store.state.meta.bdays);
+  if (!bds.length) return evs;
+  const onCal = new Set(calendarBirthdays(evs, '').map((b) => E.firstName(b.who)));
+  const extra = bds
+    .filter((b) => !onCal.has(E.firstName(b.name)))
+    .map((b) => ({ id: `bd-${E.bdayKey(b.name)}-${D}`, title: `${b.name}’s birthday`, allDay: true, startDay: D, endDay: E.addDays(D, 1), color: 'var(--amber)', calName: 'Birthdays', free: true, bday: true }));
+  return [...extra, ...evs];
+}
+
 function eventsHtml(D, isToday) {
-  const evs = google.eventsOn(D);
+  const evs = dayEvents(D);
   if (!evs.length) return '';
   const now = Date.now();
   const short = (d) => E.fmtClock(d).replace(/\s?(AM|PM)$/i, (m) => m.trim().toLowerCase().charAt(0));
@@ -990,7 +1007,7 @@ function renderCalendar(ctx) {
   for (let i = 0; i < weeks * 7; i++) {
     const D = E.addDays(start, i);
     const inMonth = D.slice(0, 7) === month;
-    const evs = google.eventsOn(D);
+    const evs = dayEvents(D);
     const done = counts.get(D) || 0;
     let planned = 0;
     let missed = 0;
@@ -1007,7 +1024,7 @@ function renderCalendar(ctx) {
   const open = E.orderOpen(items.filter((i) => i.status === 'open'), sel, ctx.s, ctx.sc);
   const fin = items.filter((i) => i.status === 'done' || i.status === 'skip' || i.status === 'part');
   const missed = items.filter((i) => i.status === 'miss');
-  const evs = google.eventsOn(sel);
+  const evs = dayEvents(sel);
   const relSel = E.fmtRelDay(sel, today, { long: true });
   const longSel = E.fmtLongDay(sel, { year: sel.slice(0, 4) !== today.slice(0, 4) });
   let agenda = `<h2>${esc(relSel)}</h2><p class="sub-date">${esc(longSel.startsWith(relSel) ? longSel.slice(relSel.length + 2) : longSel)}</p>`;
@@ -2100,6 +2117,8 @@ function renderSettings() {
 <div class="st-row"><label></label><div class="row"><button type="button" class="btn" data-st="connect">Connect</button><span id="st-gstatus" class="st-status"></span></div></div></details>
 `;
   const keepToast = $('#settings').querySelector(':scope > .toast.in-dialog');
+  // Re-drawing Settings (after a change, or when sync info arrives) keeps your place in it.
+  const keepScroll = $('#settings .st-body')?.scrollTop || 0;
   $('#settings').innerHTML = `<div class="st-head"><h2>Settings</h2><button type="button" class="icon-btn" data-st="close" aria-label="Close settings">${I.x}</button></div><div class="st-body">
 <section class="st-sec" id="st-claude"><h3>Claude <span class="badge${dv.apiKey ? '' : ' off'}">${dv.apiKey ? 'Key saved' : 'Not set up'}</span></h3>
 <p>Claude turns lists into tasks, estimates times, asks quick questions, and plans your day. Your key stays in this browser and is only sent to Anthropic.</p>
@@ -2129,6 +2148,7 @@ ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list
 <p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. Version ${APP_VERSION}, updates itself. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
   if (keepToast) $('#settings').appendChild(keepToast);
+  if (keepScroll) $('#settings .st-body').scrollTop = keepScroll;
   if (google.configured && ui.phrase == null && !ui.phraseLoading) {
     ui.phraseLoading = true;
     google
@@ -2308,6 +2328,11 @@ async function onSettings(act, el) {
     ui.bkAll = !ui.bkAll;
     return fillBackups();
   }
+  if (act === 'bday-import') return $('#bd-file')?.click();
+  if (act === 'bd-all') {
+    ui.bdAll = !ui.bdAll;
+    return renderSettings();
+  }
   if (act === 'bday-add') {
     const nameEl = $('#bd-name');
     const dateEl = $('#bd-date');
@@ -2398,6 +2423,11 @@ function onSettingsChange(e) {
     return;
   }
   if (el.id === 'st-file' && el.files?.[0]) importBackup(el.files[0]);
+  if (el.id === 'bd-file' && el.files?.[0]) {
+    const f = el.files[0];
+    el.value = '';
+    importBirthdays(f);
+  }
 }
 
 /* ---------- updates ---------- */
@@ -2604,14 +2634,48 @@ function bdaySection() {
   const seen = new Set();
   const soon = [...(google.configured ? calendarBirthdays(google.windowEvents(31), today) : []), ...added.filter((a) => a.next && E.diffDays(today, a.next) <= 31).map((a) => ({ who: a.name, D: a.next }))]
     .filter((b) => {
-      const k = `${E.bdayKey(b.who)}|${b.D}`;
+      const k = `${E.firstName(b.who)}|${b.D}`;
       return seen.has(k) ? false : seen.add(k);
     })
     .sort((a, b) => a.D.localeCompare(b.D))
     .slice(0, 8);
-  return `<section class="st-sec" id="st-bdays"><h3>Birthdays</h3><p>The day before a birthday, “Wish them a happy birthday” shows up in Today. Daywell finds birthdays on your calendar however they’re written (“Sam’s birthday”, “Sam Florek bday”, “🎂 Sam”). Add any that aren’t there, or tell Claude “Sam’s birthday is March 3”.</p>
-${soon.length ? `<p class="bd-soon">Coming up: ${soon.map((b) => `${esc(b.who)} <span>${esc(E.fmtRelDay(b.D, today))}</span>`).join(', ')}</p>` : ''}${added.length ? `<ul class="bd-list">${added.map((a) => `<li><span>${esc(a.name)}</span><span class="bd-date">${esc(md(a.md))}</span><button type="button" class="icon-btn" data-st="bday-del" data-k="${esc(a.k)}" aria-label="Remove ${esc(a.name)}’s birthday">${I.x}</button></li>`).join('')}</ul>` : ''}
-<div class="st-row"><label for="bd-name">Add one</label><div class="row bd-add"><input id="bd-name" class="inp" placeholder="Name" autocomplete="off" maxlength="60"><input id="bd-date" class="inp" type="date" aria-label="Birthday"><button type="button" class="btn secondary" data-st="bday-add">Add</button></div></div></section>`;
+  const realToday = E.keyFromDate(new Date());
+  const LIMIT = 6;
+  const shown = ui.bdAll ? added : added.slice(0, LIMIT);
+  return `<section class="st-sec" id="st-bdays"><h3>Birthdays</h3><p>The day before a birthday, “Wish them a happy birthday” shows up in Today. Daywell reads birthdays on your Google calendar however they’re written. Birthdays saved in your iPhone contacts aren’t on Google, so import them once:</p>
+<div class="bd-import"><button type="button" class="btn" data-st="bday-import">${I.upload}Import birthdays from contacts</button><input type="file" id="bd-file" accept=".vcf,.vcard,text/vcard,text/x-vcard" hidden></div>
+<p class="dr-hint bd-how">On your iPhone: Contacts → Lists → hold <b>All iCloud</b> (or All Contacts) → Export → Save to Files. Then tap Import here on your phone and pick that file. Only names and birthdays are kept.</p>
+${soon.length ? `<p class="bd-soon">Coming up: ${soon.map((b) => `${esc(b.who)} <span>${esc(E.fmtRelDay(b.D, realToday))}</span>`).join(', ')}</p>` : ''}${added.length ? `<ul class="bd-list">${shown.map((a) => `<li><span>${esc(a.name)}</span><span class="bd-date">${esc(md(a.md))}</span><button type="button" class="icon-btn" data-st="bday-del" data-k="${esc(a.k)}" aria-label="Remove ${esc(a.name)}’s birthday">${I.x}</button></li>`).join('')}</ul>${added.length > LIMIT ? `<button type="button" class="link-btn" data-st="bd-all">${ui.bdAll ? 'Show fewer' : `Show all ${added.length} birthdays`}</button>` : ''}` : ''}
+<div class="st-row"><label for="bd-name">Add one</label><div class="row bd-add"><input id="bd-name" class="inp" placeholder="Name" autocomplete="off" maxlength="60"><input id="bd-date" class="inp" type="date" aria-label="Birthday"><button type="button" class="btn secondary" data-st="bday-add">Add</button></div></div>
+<p class="dr-hint">You can also tell Claude: “Sam’s birthday is March 3”.</p></section>`;
+}
+
+// Contacts export (.vcf) → birthdays. Asks first, adds only new ones, one Undo.
+async function importBirthdays(file) {
+  let found = [];
+  try {
+    found = E.birthdaysFromVcf(await file.text());
+  } catch {
+    return toast('Couldn’t read that file. Export your contacts as a .vcf and try again.');
+  }
+  if (!found.length) return toast('No birthdays in that file. Check that the contacts have a birthday filled in.');
+  const have = store.state.meta.bdays || {};
+  const isSame = (b) => Object.values(have).some((x) => x && !x.gone && x.md === b.md && E.firstName(x.name) === E.firstName(b.name));
+  const fresh = found.filter((b) => !isSame(b));
+  if (!fresh.length) return toast(`All ${found.length} birthdays in that file are already in Daywell.`);
+  const ok = await confirmBox({ title: `Add ${fresh.length} birthday${fresh.length === 1 ? '' : 's'}?`, body: `From your contacts${found.length > fresh.length ? ` (${found.length - fresh.length} already here)` : ''}. You’ll get “Wish them a happy birthday” the day before each one, on all your devices. Only names and birthdays are kept.`, ok: 'Add birthdays' });
+  if (!ok) return;
+  store.transact(`Added ${fresh.length} birthdays`, (s) => {
+    const bd = (s.meta.bdays ||= {});
+    for (const b of fresh) {
+      let k = E.bdayKey(b.name);
+      if (bd[k] && !bd[k].gone && bd[k].md !== b.md) k = `${k}-${b.md}`;
+      bd[k] = { name: b.name, md: b.md, src: 'contacts', at: Math.max(Date.now(), (bd[k]?.at || 0) + 1) };
+    }
+  });
+  ensureBirthdays();
+  undoToast(`Added ${fresh.length} birthday${fresh.length === 1 ? '' : 's'}`, lastStep());
+  if ($('#settings').open) renderSettings();
 }
 
 function exportBackup() {
@@ -2685,6 +2749,11 @@ function applyTheme() {
 const SCRIPT_PREFIX = 'https://script.google.com/macros/s/';
 
 async function handleSetupLink() {
+  // daywell/#birthdays opens Settings at Birthdays (handy for importing on your phone).
+  if (/^#(birthdays|bdays)$/i.test(location.hash)) {
+    history.replaceState(null, '', location.pathname + location.search);
+    return setTimeout(() => openSettings('bdays'), 300);
+  }
   const m = location.hash.match(/^#setup=([\w-]+)/);
   if (!m) return;
   history.replaceState(null, '', location.pathname + location.search);

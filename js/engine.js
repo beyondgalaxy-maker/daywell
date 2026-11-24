@@ -210,6 +210,68 @@ export function isSelfName(who, { email = '', name = '' } = {}) {
   return [first + last[0], first + last, first[0] + last, last + first].includes(local);
 }
 
+// Birthdays from a contacts export (.vcf), e.g. iPhone: Contacts → Lists → hold All iCloud →
+// Export. Only each person's name and month-day are read; nothing else in the file is kept.
+// Handles vCard 2.1–4.0 from iPhone, Mac, iCloud and Google: folded lines, quoted-printable
+// names, escaped commas, Apple's "no year" dates (1604-11-24) and vCard 4's --1124.
+export function birthdaysFromVcf(text) {
+  const unesc = (v) => String(v || '').replace(/\\n/gi, ' ').replace(/\\([,;\\])/g, '$1').trim();
+  const qp = (v) => {
+    const bytes = [];
+    const raw = v.replace(/=\r?\n/g, '');
+    for (let i = 0; i < raw.length; i++) {
+      if (raw[i] === '=' && /^[0-9A-F]{2}$/i.test(raw.slice(i + 1, i + 3))) {
+        bytes.push(parseInt(raw.slice(i + 1, i + 3), 16));
+        i += 2;
+      } else bytes.push(...new TextEncoder().encode(raw[i]));
+    }
+    return new TextDecoder().decode(new Uint8Array(bytes));
+  };
+  // Unfold: a line starting with a space or tab continues the one before; quoted-printable
+  // values continue after a trailing "=".
+  const lines = [];
+  for (const line of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+    const last = lines.length - 1;
+    if (/^[ \t]/.test(line) && last >= 0) lines[last] += line.slice(1);
+    else if (last >= 0 && /ENCODING=QUOTED-PRINTABLE/i.test(lines[last].split(':')[0]) && /=$/.test(lines[last])) lines[last] = `${lines[last].slice(0, -1)}${line}`;
+    else lines.push(line);
+  }
+  const out = [];
+  const seen = new Set();
+  let card = null;
+  for (const line of lines) {
+    if (/^BEGIN:VCARD\s*$/i.test(line)) {
+      card = {};
+      continue;
+    }
+    if (/^END:VCARD\s*$/i.test(line)) {
+      const name = (card?.fn || [card?.n?.[1], card?.n?.[2], card?.n?.[0]].filter(Boolean).join(' ')).replace(/\s+/g, ' ').trim().slice(0, 60);
+      const m = String(card?.bday || '').match(/^(?:--(\d{2})-?(\d{2})|(?:\d{4})-?(\d{2})-?(\d{2}))/);
+      const mo = m && (m[1] || m[3]);
+      const d = m && (m[2] || m[4]);
+      const md = mo && `${mo}-${d}`;
+      if (name && md && isKey(`2024-${md}`) && !seen.has(`${bdayKey(name)}|${md}`)) {
+        seen.add(`${bdayKey(name)}|${md}`);
+        out.push({ name, md });
+      }
+      card = null;
+      continue;
+    }
+    if (!card) continue;
+    const i = line.indexOf(':');
+    if (i < 1) continue;
+    const head = line.slice(0, i);
+    const prop = head.split(';')[0].replace(/^item\d+\./i, '').toUpperCase();
+    let value = line.slice(i + 1);
+    if (/ENCODING=QUOTED-PRINTABLE/i.test(head)) value = qp(value);
+    if (prop === 'FN') card.fn = unesc(value);
+    else if (prop === 'N') card.n = value.split(/(?<!\\);/).map(unesc);
+    else if (prop === 'BDAY') card.bday = value.trim();
+  }
+  return out;
+}
+export const firstName = (name) => String(name || '').trim().split(/\s+/)[0].toLowerCase();
+
 // Birthdays you add in Daywell itself (for ones that aren't on your Google calendar).
 export const bdayKey = (name) => String(name || '').toLowerCase().normalize('NFKD').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'someone';
 export function birthdaysOn(D, bdays = {}) {
