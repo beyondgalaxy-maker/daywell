@@ -499,3 +499,13 @@ test('habits read partly done as working time, not as things finished', () => {
   assert.match(p.basedOn, /^6 check-offs/);
   assert.match(p.lines[0], /afternoon/);
 });
+
+test('app, service worker and version.json agree on the version', async () => {
+  const fs = await import('node:fs');
+  const root = new URL('../', import.meta.url);
+  const app = Number(fs.readFileSync(new URL('js/app.js', root), 'utf8').match(/const APP_VERSION = (\d+);/)[1]);
+  const sw = Number(fs.readFileSync(new URL('sw.js', root), 'utf8').match(/daywell-v(\d+)/)[1]);
+  const vj = JSON.parse(fs.readFileSync(new URL('version.json', root), 'utf8')).v;
+  assert.equal(sw, app);
+  assert.equal(vj, app);
+});

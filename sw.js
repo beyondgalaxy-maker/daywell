@@ -1,5 +1,5 @@
 // Daywell service worker: works offline, always prefers the freshest version when online.
-const CACHE = 'daywell-v13';
+const CACHE = 'daywell-v14';
 const ASSETS = [
   './',
   'index.html',
@@ -23,7 +23,8 @@ self.addEventListener('install', (e) => {
   e.waitUntil(
     caches
       .open(CACHE)
-      .then((c) => c.addAll(ASSETS))
+      // reload: skip the browser's own cache, so a new version never installs old files.
+      .then((c) => c.addAll(ASSETS.map((a) => new Request(a, { cache: 'reload' }))))
       .then(() => self.skipWaiting()),
   );
 });

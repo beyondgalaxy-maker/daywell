@@ -6,9 +6,12 @@ import { Google, HOME_SCRIPT, newSecret, scriptText, validScriptUrl } from './go
 import { I } from './icons.js';
 import * as Backup from './backup.js';
 
+// Bump with sw.js (CACHE) and version.json on every release; a test keeps the three in step.
+const APP_VERSION = 14;
+
 const store = new Store();
 const google = new Google(store);
-window.__daywell = { store, google, E };
+window.__daywell = { store, google, E, APP_VERSION, checkForUpdate };
 
 const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
@@ -667,6 +670,7 @@ ${isToday ? `<button type="button" class="plan-btn${planned ? ' ghost' : ''}" da
   const bonus = !!nextItem?.t.optional;
   // A one-time hint so the phone gestures are discoverable.
   if (isToday && open.length >= 2 && coarse() && !store.device.tipGestures) html += `<p class="tip">${I.spark}<span>Swipe right when done, left for later. Hold to move.</span><button type="button" class="chip-btn" data-act="tip-ok">Got it</button></p>`;
+  else if (isToday && open.length && !store.device.tipPartly && !ctx.idx.parts?.size) html += `<p class="tip tip-new">${I.half}<span><b>New:</b> did some of a task but not all? ${coarse() ? 'Tap' : 'Click'} <span class="tip-dots" aria-label="the three dots">${I.more}</span> on it, then <b>Partly done</b>.</span><button type="button" class="chip-btn" data-act="tip-part">Got it</button></p>`;
   const row = (i) => taskRow(i, ctx, 'day', { next: i === nextItem, bonus });
   const dailyRow = (i) => taskRow(i, ctx, 'daily', { next: i === nextItem, bonus });
   const empty = (msg) => `<li class="empty-drop">${msg}</li>`;
@@ -1378,11 +1382,11 @@ function renderDrawer() {
 <div class="dr-body">
 <textarea class="dr-title" data-f="title" rows="1" aria-label="Title">${esc(t.title)}</textarea>
 <div class="dr-done"><button type="button" class="chip-btn${doneToday ? ' on' : ''}" data-dr="toggle-done">${I.tick}${doneToday ? (rep ? 'Done today' : 'Done') : rep ? 'Mark done today' : 'Mark done'}</button>
-<button type="button" class="chip-btn" data-dr="timer">${timing ? `${I.stop}Stop timer` : `${I.play}Start timer`}</button>
 ${(() => {
     const ps = partState(t, null, ctx);
     return ps.part ? `<button type="button" class="chip-btn on" data-dr="unpart" title="Take back “partly done”">${I.half}Partly done${rep ? ' today' : ''}</button>` : `<button type="button" class="chip-btn" data-dr="part">${I.half}${ps.done ? 'Only partly done' : 'Partly done'}</button>`;
   })()}
+<button type="button" class="chip-btn" data-dr="timer">${timing ? `${I.stop}Stop timer` : `${I.play}Start timer`}</button>
 ${rep && !doneToday ? '<button type="button" class="chip-btn" data-dr="skip">Skip today</button>' : ''}</div>
 <div class="field"><span class="label">Priority</span><div class="seg" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-dr="pri" data-v="${p}" aria-pressed="${t.priority === p}">${E.PRIORITY_NAMES[p]}</button>`).join('')}</div></div>
 <div class="field"><label for="drDate">${rep ? 'Next one on' : 'Do on'}</label><div><div class="row"><input id="drDate" class="inp" type="date" data-f="${rep ? 'plan' : 'date'}" value="${(rep ? t.plan : t.date) || ''}"><button type="button" class="chip-btn" data-dr="date" data-v="">${rep ? 'Usual schedule' : 'No date'}</button></div><div class="row" style="margin-top:6px">${dateChips}</div></div></div>
@@ -1485,15 +1489,17 @@ function openMenu(anchor, id, day) {
     ['Next week', E.resolveDate('next week', today, ws)],
   ];
   const timing = store.state.meta.timer?.id === id;
+  // Done and Partly done side by side, first thing in the menu.
   const ps = partState(t, day, ctx);
-  const partBtn = ps.done
-    ? `<button type="button" class="mi" role="menuitem" data-m="part">${I.half}Only partly done</button>`
-    : ps.part
-      ? `<button type="button" class="mi" role="menuitem" data-m="unpart">${I.half}Not partly done<small>take it back</small></button>`
-      : `<button type="button" class="mi" role="menuitem" data-m="part">${I.half}Partly done</button>`;
+  const status = `<div class="m-status" role="group" aria-label="Progress">${
+    ps.done ? `<button type="button" class="m-st" data-m="undone">${I.undo}Not done</button>` : `<button type="button" class="m-st m-done" data-m="done">${I.tick}Done</button>`
+  }${
+    ps.part
+      ? `<button type="button" class="m-st m-part" data-m="unpart" aria-pressed="true" title="Take back “partly done”">${I.half}Partly done</button>`
+      : `<button type="button" class="m-st m-part" data-m="part" aria-pressed="false">${I.half}${ps.done ? 'Only partly' : 'Partly done'}</button>`
+  }</div>`;
   const m = $('#menu');
-  m.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div><div class="m-pris" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-m="pri" data-v="${p}" aria-pressed="${t.priority === p}" title="${E.PRIORITY_NAMES[p]}">P${p}</button>`).join('')}</div>
-${partBtn}${rep?.kind === 'daily' ? '' : '<hr>'}
+  m.innerHTML = `<div class="sheet-grip" aria-hidden="true"></div>${status}<div class="m-pris" role="group" aria-label="Priority">${[1, 2, 3, 4].map((p) => `<button type="button" class="p${p}" data-m="pri" data-v="${p}" aria-pressed="${t.priority === p}" title="${E.PRIORITY_NAMES[p]}">P${p}</button>`).join('')}</div>
 ${rep?.kind === 'daily' ? '' : `${opts.map(([l, v]) => `<button type="button" class="mi" role="menuitem" data-m="move" data-v="${v}">${l === 'Today' ? I.sun : I.calendar}${l}<small>${E.fmtShortDate(v)}</small></button>`).join('')}
 <div class="m-date"><input type="date" class="inp" data-m="pick" aria-label="Pick a date" min="${today}"></div>
 <button type="button" class="mi" role="menuitem" data-m="move" data-v="">${I.x}${rep ? 'Back to its usual schedule' : 'No date'}</button><hr>`}
@@ -1517,7 +1523,7 @@ ${rep && inToday ? `<button type="button" class="mi" role="menuitem" data-m="ski
     m.style.left = `${Math.max(8, left)}px`;
     m.style.top = `${top}px`;
   }
-  m.querySelector('.mi')?.focus({ preventScroll: true });
+  m.querySelector('.m-st, .mi')?.focus({ preventScroll: true });
 }
 // Which day a "partly done" from this row counts for (today, or the past day you're looking at),
 // and where the task stands on it.
@@ -1561,6 +1567,14 @@ function onMenu(act, el) {
   } else if (act === 'skip') {
     store.skip(t.id, today);
     undoToast(`Skipped “${t.title}” today`, lastStep());
+  } else if (act === 'done') {
+    const { day } = partState(t, f.day);
+    store.complete(t.id, day);
+    undoToast(doneMessage(t, day), lastStep());
+  } else if (act === 'undone') {
+    const { day } = partState(t, f.day);
+    store.uncomplete(t.id, t.repeat ? day : t.doneDay || day);
+    undoToast(`Reopened “${t.title}”`, lastStep());
   } else if (act === 'part') markPartly(t, f.day);
   else if (act === 'unpart') {
     store.unpartDone(t.id, partState(t, f.day).day);
@@ -2112,7 +2126,7 @@ ${bdaySection()}
 <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px"><button type="button" class="btn secondary" data-st="export">${I.download}Download backup</button><button type="button" class="btn secondary" data-st="import">${I.upload}Restore from a file</button><input type="file" id="st-file" accept="application/json,.json" hidden>${!store.state.meta.seeded || !store.state.tasks.some((t) => !t.purged && E.STARTER.some((s) => s.title === t.title)) ? `<button type="button" class="btn secondary" data-st="seed">Add my Daywell routines</button>` : ''}<button type="button" class="btn secondary" data-st="wipe" style="color:var(--danger)">${I.trash}Delete all tasks</button></div></section>
 <section class="st-sec"><h3>Appearance</h3><div class="st-row"><label>Theme</label><div class="seg" role="group">${['auto', 'light', 'dark'].map((v) => `<button type="button" data-st="theme" data-v="${v}" aria-pressed="${dv.theme === v}">${v === 'auto' ? 'Match system' : v[0].toUpperCase() + v.slice(1)}</button>`).join('')}</div></div></section>
 ${coarse() ? '' : `<section class="st-sec"><h3>Keyboard</h3><div class="kbd-list"><kbd>N</kbd><span>Add a task</span><kbd>Enter</kbd><span>Add what you typed</span><kbd>${MOD} Enter</kbd><span>Send it to Claude</span><kbd>${MOD} Z</kbd><span>Undo (${MOD} Shift Z to redo)</span><kbd>[ ]</kbd><span>Previous or next day</span><kbd>T C H</kbd><span>Today, Calendar, History</span><kbd>P</kbd><span>Plan my day</span><kbd>Esc</kbd><span>Close panels</span></div></section>`}
-<p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
+<p class="muted-note" style="margin-top:8px">Daywell runs entirely in your browser. Version ${APP_VERSION}, updates itself. <a href="https://github.com/beyondgalaxy-maker/daywell" target="_blank" rel="noopener">Source</a></p>
 </div>`;
   if (keepToast) $('#settings').appendChild(keepToast);
   if (google.configured && ui.phrase == null && !ui.phraseLoading) {
@@ -2384,6 +2398,78 @@ function onSettingsChange(e) {
     return;
   }
   if (el.id === 'st-file' && el.files?.[0]) importBackup(el.files[0]);
+}
+
+/* ---------- updates ---------- */
+// New versions load by themselves. Daywell asks the site which version is current when it
+// opens, when you come back to it, and every 20 minutes. If there's a newer one it reloads at a
+// quiet moment: right away while it's in the background or just opened, otherwise once you've
+// left it alone for 20 seconds (never while you're typing, in a panel, or Claude is working).
+// Everything is saved as you go, so a reload loses nothing.
+const BOOT_AT = Date.now();
+let swReg = null;
+async function checkForUpdate() {
+  ui.lastUpdateCheck = Date.now();
+  let v = 0;
+  try {
+    const r = await fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' });
+    if (r.ok) v = Number((await r.json()).v) || 0;
+  } catch {
+    return;
+  }
+  if (v <= APP_VERSION) return;
+  swReg?.update().catch(() => {});
+  ui.updateTo = v;
+  reloadWhenQuiet();
+}
+function quietNow() {
+  if (document.hidden) return true;
+  const busy =
+    !!$('#input')?.value.trim() ||
+    !!document.querySelector('dialog[open]') ||
+    !!ui.drawer ||
+    !$('#menu').hidden ||
+    !!drag.s ||
+    ui.ai?.status === 'busy' ||
+    !!ui.planning ||
+    !!ui.sorting ||
+    !!document.activeElement?.matches?.('input, textarea, select, [contenteditable]');
+  if (busy) return false;
+  return Date.now() - BOOT_AT < 8000 || Date.now() - (ui.lastInput || 0) > 20000;
+}
+function reloadWhenQuiet() {
+  clearTimeout(ui.updateTimer);
+  if (!ui.updateTo) return;
+  let tried = 0;
+  try {
+    tried = Number(sessionStorage.getItem('dw:reloadFor')) || 0;
+  } catch {}
+  if (tried >= ui.updateTo) {
+    // Already reloaded for this version and still on the old one: let you do it.
+    if (!ui.updateOffered) {
+      ui.updateOffered = true;
+      toast('A new version of Daywell is ready', { label: 'Reload', run: () => location.reload() });
+    }
+    return;
+  }
+  if (!quietNow()) {
+    ui.updateTimer = setTimeout(reloadWhenQuiet, 5000);
+    return;
+  }
+  try {
+    sessionStorage.setItem('dw:reloadFor', String(ui.updateTo));
+    sessionStorage.setItem('dw:updatedFrom', String(APP_VERSION));
+  } catch {}
+  store.flush();
+  location.reload();
+}
+function afterUpdate() {
+  let from = 0;
+  try {
+    from = Number(sessionStorage.getItem('dw:updatedFrom')) || 0;
+    sessionStorage.removeItem('dw:updatedFrom');
+  } catch {}
+  if (from && from < APP_VERSION) setTimeout(() => toast('Daywell updated to the latest version'), 600);
 }
 
 /* ---------- backups ---------- */
@@ -3037,6 +3123,9 @@ function onClick(e) {
     case 'tip-ok':
       store.setDevice({ tipGestures: true });
       return render();
+    case 'tip-part':
+      store.setDevice({ tipPartly: true });
+      return render();
     case 'start':
       if (!id) return;
       store.startTimer(id);
@@ -3465,7 +3554,9 @@ function bindEvents() {
     if (document.visibilityState === 'hidden') {
       store.flush();
       if (Date.now() - (ui.lastBackupAt || 0) > 60000) autoBackup();
+      if (ui.updateTo) reloadWhenQuiet();
     } else {
+      if (Date.now() - (ui.lastUpdateCheck || 0) > 120000) checkForUpdate();
       render();
       if (google.configured) {
         google.sync();
@@ -3550,7 +3641,16 @@ function boot() {
     const first = Promise.allSettled([google.sync(), google.refreshEvents(true)]);
     Promise.race([first, new Promise((r) => setTimeout(r, 6000))]).then(() => maybeAutoPlan());
   } else setTimeout(maybeAutoPlan, 400);
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker
+      .register('sw.js', { updateViaCache: 'none' })
+      .then((r) => (swReg = r))
+      .catch(() => {});
+  }
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) addEventListener(ev, () => (ui.lastInput = Date.now()), { capture: true, passive: true });
+  afterUpdate();
+  setTimeout(checkForUpdate, 1500);
+  setInterval(checkForUpdate, 20 * 60000);
 }
 
 boot();
